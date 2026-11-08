@@ -1,0 +1,13 @@
+name = "lumen-club"
+main = "worker.js"
+compatibility_date = "2024-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lumen-db"
+database_id = "dc4b2bef-e292-4b0e-8111-c5feb2a97edb"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "90051448d122432abb561afe3ebef3b2"
