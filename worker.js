@@ -542,7 +542,6 @@ async function sendMenuFan(env, chatId) {
     [{ text: "🆘 Soporte y Ayuda", callback_data: "support_fan" }]
   ]); 
 }
-  
 async function sendMenuCreator(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
     [{ text: "📤 Subir Contenido al Canal VIP", callback_data: "creator_upload" }],
@@ -553,7 +552,6 @@ async function sendMenuCreator(env, chatId) {
     [{ text: "📚 Guía y Tutorial de la Creadora", callback_data: "creator_tutorial" }, { text: "🆘 Soporte Técnico", callback_data: "creator_support" }]
   ]); 
 }
-  
 async function sendMenuAdmin(env, chatId) { 
   const state = await env.KV.get("config:creator_registration") || "open"; 
   const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
@@ -562,5 +560,4 @@ async function sendMenuAdmin(env, chatId) {
     [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn + " del Sistema", callback_data: "admin_pause" }]
   ]); 
-}
 }
