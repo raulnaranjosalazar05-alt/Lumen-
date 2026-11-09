@@ -405,27 +405,46 @@ async function handleCallback(cb, env) {
   return await sendMessage(env, ADMIN_ID, "✅ Denuncia ignorada. Los reportes han sido borrados.");
 }
   if (data === "admin_stats") { 
-    const s = await env.DB.prepare("SELECT COUNT(*) as n FROM subscribers").first(); 
-    const c = await env.DB.prepare("SELECT COUNT(*) as n FROM creators WHERE id > 1").first(); 
-    const act = await env.DB.prepare("SELECT COUNT(*) as n FROM subscriptions WHERE status = 'active'").first(); 
-    return await sendMessageWithButtons(env, chatId, `📈 *Estadísticas*\n\nFans: ${s.n}\nCreadoras: ${c.n}\nSuscripciones: ${act.n}`, [[{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]]); 
-  }
+  const s = await env.DB.prepare("SELECT COUNT(*) as n FROM subscribers").first(); 
+  const c = await env.DB.prepare("SELECT COUNT(*) as n FROM creators WHERE id > 1").first(); 
+  const act = await env.DB.prepare("SELECT COUNT(*) as n FROM subscriptions WHERE status = 'active'").first(); 
+  
+  // Calculamos los ingresos del mes actual
+  const now = new Date();
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const income = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ?").bind(period).first();
+  
+  return await sendMessageWithButtons(env, chatId, `📈 *Estadísticas Generales*\n\nFans Totales: ${s.n}\nCreadoras Activas: ${c.n}\nSuscripciones Activas: ${act.n}\nIngresos del Mes: ${income.n.toFixed(2)} USDT`, [[{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]]); 
+}
   
   // Paginación Creadoras
   if (data.startsWith("admin_creators_page_")) {
-    const page = parseInt(data.split("_")[3]) || 0;
-    const limit = 5;
-    const offset = page * limit;
-    const total = await env.DB.prepare("SELECT COUNT(*) as n FROM creators WHERE id > 1 AND active = 1").first();
-    const c = await env.DB.prepare("SELECT * FROM creators WHERE id > 1 AND active = 1 LIMIT ? OFFSET ?").bind(limit, offset).all();
-    let t = `👥 *Creadoras (Pág ${page + 1})*\n\n`; 
-    for (const x of c.results) t += `• ${x.display_name}\n`; 
-    const buttons = [];
-    if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
-    if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
-    buttons.push([{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]);
-    return await sendMessageWithButtons(env, chatId, t, buttons);
+  const page = parseInt(data.split("_")[3]) || 0;
+  const limit = 5;
+  const offset = page * limit;
+  const total = await env.DB.prepare("SELECT COUNT(*) as n FROM creators WHERE id > 1 AND active = 1").first();
+  const c = await env.DB.prepare("SELECT * FROM creators WHERE id > 1 AND active = 1 LIMIT ? OFFSET ?").bind(limit, offset).all();
+  
+  const now = new Date(); 
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  
+  let t = `👥 *Creadoras (Pág ${page + 1})*\n\n`; 
+  for (const x of c.results) {
+    // Calculamos fans y estrellas de cada una
+    const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(x.start_code).first();
+    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(x.id, period).first();
+    const totalStars = stars ? stars.total_stars : 0;
+    const qualityIndex = f.t > 0 ? (totalStars / f.t) : 0;
+    
+    t += `• *${x.display_name}*\n  Fans: ${f.t} | ⭐ Calidad: ${qualityIndex.toFixed(2)}\n`; 
   }
+  
+  const buttons = [];
+  if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
+  if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
+  buttons.push([{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]);
+  return await sendMessageWithButtons(env, chatId, t, buttons);
+}
   if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env); // Ir a la página 1
   
   // Paginación Pagos
