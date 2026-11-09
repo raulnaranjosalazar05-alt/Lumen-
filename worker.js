@@ -33,7 +33,7 @@ export default {
   }
 };
 
-// === LIMPIEZA ESTRICTA ===
+// === LIMPIEZA ESTRICTA (Borra mensajes para no acumular) ===
 async function cleanChat(env, chatId, messageId) {
   try {
     await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`, {
@@ -43,7 +43,7 @@ async function cleanChat(env, chatId, messageId) {
   } catch (e) {}
 }
 
-// === PAGOS DE FANS (RPC) ===
+// === PAGOS DE FANS (Lectura RPC) ===
 async function checkPayments(env) {
   const pending = await env.DB.prepare("SELECT * FROM subscriptions WHERE status = 'pending'").all();
   if (!pending.results || pending.results.length === 0) return;
@@ -98,7 +98,6 @@ async function checkWeeklyActivity(env) {
     const start = new Date(c.created_at);
     const diffDays = Math.floor((now - start) / (1000 * 60 * 60 * 24));
     
-    // Cada 7 días revisa
     if (diffDays > 0 && diffDays % 7 === 0 && now.getUTCHours() === 12) {
       const posts = await env.DB.prepare("SELECT COUNT(*) as n FROM posts WHERE creator_id = ? AND created_at >= datetime('now', '-7 days')").bind(c.id).first();
       if (posts.n < 3) {
@@ -131,7 +130,6 @@ async function checkMonthlyPayouts(env) {
       continue;
     }
 
-    // 1. Calcular comisión por fans
     const fans = row.total_subs;
     let pct = 0.50;
     if (fans >= 100 && fans < 500) pct = 0.60;
@@ -141,7 +139,6 @@ async function checkMonthlyPayouts(env) {
 
     const commission = fans * 1.0 * pct;
     
-    // 2. Calcular Bono de Calidad (Estrellas)
     const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(creator.id, period).first();
     const totalStars = stars ? stars.total_stars : 0;
     const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
@@ -156,7 +153,7 @@ async function checkMonthlyPayouts(env) {
     const bonus = ownerMargin * bonusPct;
     
     const totalToPay = commission + bonus;
-    if (totalToPay < 0.10) continue; // Evitar polvo
+    if (totalToPay < 0.10) continue;
 
     const amountInWei = parseUnits(totalToPay.toFixed(2), 18);
 
@@ -170,10 +167,9 @@ async function checkMonthlyPayouts(env) {
       });
       const hash = await client.writeContract(request);
       
-      // Registrar pago
-      await env.DB.prepare("INSERT INTO payments (subscriber_id, creator_id, amount_usdt, period, tx_hash) VALUES (0, ?, ?, ?, ?)").bind(creator.id, totalToPay, period, hash).run();
+      // CORRECCIÓN: Usamos el ID de la creadora como subscriber_id para evitar error NOT NULL
+      await env.DB.prepare("INSERT INTO payments (subscriber_id, creator_id, amount_usdt, period, tx_hash) VALUES (?, ?, ?, ?, ?)").bind(creator.id, creator.id, totalToPay, period, hash).run();
 
-      // Avisar a la creadora y al grupo de creadoras con el hash
       const msg = `💰 *Pago Realizado - ${period}*\n\n*Creadora:* ${creator.display_name}\n*Monto:* ${totalToPay.toFixed(2)} USDT\n*Hash:* \`${hash}\`\n\nVerificar en BscScan.`;
       await sendMessage(env, creator.telegram_id, msg);
       
@@ -194,23 +190,20 @@ async function handleUpdate(update, env) {
   const msg = update.message;
   if (!msg) return;
   
-  // Si es una nota de video o foto/video, lo mandamos a su función
   if (msg.video_note || msg.photo || msg.video) {
     return await handleMedia(env, msg);
   }
 
-  // Si es texto
   if (!msg.text) return;
   const chatId = msg.chat.id, telegramId = msg.from.id;
   const text = msg.text.trim();
   const startMatch = text.match(/^\/start(?:\s+(.+))?$/);
   
   if (startMatch) {
-    await cleanChat(env, chatId, msg.message_id); // Limpiar el /start
+    await cleanChat(env, chatId, msg.message_id);
     return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim());
   }
   
-  // Si es la wallet
   if (text.startsWith("0x") && text.length === 42) {
     await cleanChat(env, chatId, msg.message_id);
     const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
@@ -220,7 +213,6 @@ async function handleUpdate(update, env) {
     }
   }
   
-  // Si es soporte
   await cleanChat(env, chatId, msg.message_id);
   await sendMessage(env, ADMIN_ID, `🆘 *SOPORTE:* @${msg.from.username || "sin_user"} (ID: ${telegramId}) dice:\n\n"${text}"`);
 }
@@ -244,7 +236,7 @@ async function handleStart(env, chatId, telegramId, username, startCode) {
 async function handleCallback(cb, env) {
   const chatId = cb.message.chat.id, telegramId = cb.from.id, data = cb.data;
   await answerCallback(env, cb.id);
-  await cleanChat(env, chatId, cb.message.message_id); // Limpieza estricta al tocar botones
+  await cleanChat(env, chatId, cb.message.message_id);
 
   // === FAN ===
   if (data === "subscribe") {
@@ -370,8 +362,6 @@ async function handleCallback(cb, env) {
 
 async function handleMedia(env, msg) {
   const chatId = msg.chat.id, telegramId = msg.from.id;
-  
-  // Si es Nota de Video, es para verificación (o publicación si ya es creadora)
   const state = await env.KV.get(`upload_state:${telegramId}`);
   if (state === "waiting") {
     await env.KV.delete(`upload_state:${telegramId}`);
@@ -419,7 +409,6 @@ async function answerCallback(env, id) {
   return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ callback_query_id: id }) }).then(r => r.json());
 }
 
-// === MENÚS (1 y 2 filas) ===
 async function sendMenuFan(env, chatId) {
   await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nElige una opción:", [
     [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
