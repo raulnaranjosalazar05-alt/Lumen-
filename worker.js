@@ -165,9 +165,14 @@ async function handleMedia(env, msg) {
   const chatId = msg.chat.id, telegramId = msg.from.id;
   const uploadState = await env.KV.get(`upload_state:${telegramId}`);
   if (uploadState === "waiting") {
-    await env.KV.delete(`upload_state:${telegramId}`);
-    const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ? AND verified = 1").bind(telegramId).first();
-    if (!creator) return await sendMessage(env, chatId, "❌ No estás verificada como creadora.");
+  await env.KV.delete(`upload_state:${telegramId}`);
+  // Borramos el mensaje de las reglas (y cualquier otro que haya mandado)
+  await cleanChat(env, chatId, msg.message_id - 1); 
+  await cleanChat(env, chatId, msg.message_id);
+  
+  const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ? AND verified = 1").bind(telegramId).first();
+  if (!creator) return await sendMessage(env, chatId, "❌ No estás verificada como creadora.");
+  
     const channelId = await env.KV.get("config:channel_id");
     const groupId = await env.KV.get("config:control_group_id");
     await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, from_chat_id: chatId, message_id: msg.message_id, reply_markup: { inline_keyboard: [[{ text: "🚨 Denunciar", callback_data: "report_post" }]] } }) });
@@ -256,15 +261,22 @@ async function handleCallback(cb, env) {
 }
   if (data === "report_post") {
   const post = await env.DB.prepare("SELECT creator_id, message_id FROM posts WHERE message_id = ?").bind(cb.message.message_id).first();
-  if (post) {
+  if (!post) return await sendMessage(env, chatId, "❌ Error: Post no encontrado.");
+
+  await env.DB.prepare("INSERT INTO reports (message_id, reporter_id) VALUES (?, ?) ON CONFLICT DO NOTHING").bind(post.message_id, cb.from.id).run();
+  const count = await env.DB.prepare("SELECT COUNT(*) as n FROM reports WHERE message_id = ?").bind(post.message_id).first();
+
+  if (count.n >= 3) {
     const creator = await env.DB.prepare("SELECT display_name, telegram_id FROM creators WHERE id = ?").bind(post.creator_id).first();
-    
-    // Te enviamos el aviso CON BOTÓN para banear
-    await sendMessageWithButtons(env, ADMIN_ID, `🚨 *NUEVA DENUNCIA*\n\nFan: @${cb.from.username || "sin_user"}\nCreadora: ${creator ? creator.display_name : "Desconocida"}\nID Creadora: \`${creator ? creator.telegram_id : "0"}\`\nPost ID: ${post.message_id}`, [
-      [{ text: "🚫 Banear Creadora", callback_data: `admin_ban_${creator ? creator.telegram_id : 0}` }]
+    await sendMessageWithButtons(env, ADMIN_ID, `🚨 *POST REPORTADO 3 VECES*\n\nCreadora: ${creator.display_name}\nID: \`${creator.telegram_id}\``, [
+      [{ text: "🚫 Banear Creadora", callback_data: `admin_ban_${creator.telegram_id}` }],
+      [{ text: "✅ Ignorar", callback_data: `admin_ignore_${post.message_id}` }]
     ]);
+    const channelId = await env.KV.get("config:channel_id");
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: ADMIN_ID, from_chat_id: channelId, message_id: post.message_id }) });
   }
-  return await sendMessage(env, chatId, "✅ Denuncia enviada. Un administrador revisará el contenido.");
+
+  return await sendMessage(env, chatId, "✅ Denuncia enviada. Gracias por ayudar.");
 }
 
   // === CREADORA ===
@@ -387,6 +399,11 @@ async function handleCallback(cb, env) {
 
   // === ADMIN ===
   if (data === "admin_menu") return await sendMenuAdmin(env, chatId);
+  if (data.startsWith("admin_ignore_")) {
+  const msgId = data.split("_")[2];
+  await env.DB.prepare("DELETE FROM reports WHERE message_id = ?").bind(msgId).run();
+  return await sendMessage(env, ADMIN_ID, "✅ Denuncia ignorada. Los reportes han sido borrados.");
+}
   if (data === "admin_stats") { 
     const s = await env.DB.prepare("SELECT COUNT(*) as n FROM subscribers").first(); 
     const c = await env.DB.prepare("SELECT COUNT(*) as n FROM creators WHERE id > 1").first(); 
@@ -482,31 +499,34 @@ async function answerCallback(env, id) { return fetch(`https://api.telegram.org/
 function json(obj, status = 200) { return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }); }
 
 async function sendMenuFan(env, chatId) { 
-  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
   await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
-    [{ text: "💎 Suscribirme — 1 USDT" + space, callback_data: "subscribe" }],
-    [{ text: "📊 Mi Estado" + space, callback_data: "status" }, { text: "📚 ¿Cómo funciona?" + space, callback_data: "how_it_works" }],
-    [{ text: "🆘 Soporte" + space, callback_data: "support_fan" }]
+    [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
+    [{ text: "📊 Mi Estado", callback_data: "status" }],
+    [{ text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],
+    [{ text: "🆘 Soporte", callback_data: "support_fan" }]
   ]); 
 }
 async function sendMenuCreator(env, chatId) { 
-  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
   await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
-    [{ text: "📤 Subir Contenido" + space, callback_data: "creator_upload" }],
-    [{ text: "📊 Mi Panel" + space, callback_data: "creator_panel" }, { text: "💰 Mis Ganancias" + space, callback_data: "creator_earnings" }],
-    [{ text: "🏦 Mi Wallet" + space, callback_data: "creator_wallet" }, { text: "🔗 Enlace Canal" + space, callback_data: "creator_channel_link" }],
-    [{ text: "🎯 Enlace Fans" + space, callback_data: "creator_ref_link" }, { text: "📜 Normas" + space, callback_data: "creator_norms" }],
-    [{ text: "🧮 Cómo se calcula" + space, callback_data: "creator_calc" }],
-    [{ text: "📚 Tutorial" + space, callback_data: "creator_tutorial" }, { text: "🆘 Soporte" + space, callback_data: "creator_support" }]
+    [{ text: "📤 Subir Contenido", callback_data: "creator_upload" }],
+    [{ text: "📊 Mi Panel", callback_data: "creator_panel" }],
+    [{ text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],
+    [{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }],
+    [{ text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],
+    [{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }],
+    [{ text: "📜 Normas", callback_data: "creator_norms" }],
+    [{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }],
+    [{ text: "📚 Tutorial", callback_data: "creator_tutorial" }],
+    [{ text: "🆘 Soporte", callback_data: "creator_support" }]
   ]); 
 }
 async function sendMenuAdmin(env, chatId) { 
   const state = await env.KV.get("config:creator_registration") || "open"; 
   const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
-  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
   await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
-    [{ text: "📈 Estadísticas Generales" + space, callback_data: "admin_stats" }],
-    [{ text: "👥 Gestionar Creadoras" + space, callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos" + space, callback_data: "admin_payments" }],
-    [{ text: pauseBtn + space, callback_data: "admin_pause" }]
+    [{ text: "📈 Estadísticas Generales", callback_data: "admin_stats" }],
+    [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }],
+    [{ text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
+    [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
 }
