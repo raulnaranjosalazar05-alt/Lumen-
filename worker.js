@@ -138,7 +138,8 @@ async function handleUpdate(update, env) {
     if (text.startsWith("0x") && text.length === 42) {
       await env.DB.prepare("UPDATE creators SET wallet_address = ? WHERE telegram_id = ?").bind(text, telegramId).run();
       await env.KV.delete(`state:${telegramId}`);
-      return await sendMessage(env, chatId, "✅ Wallet guardada correctamente.");
+      await sendMessage(env, chatId, "✅ Wallet guardada correctamente.");
+      return await sendMenuCreator(env, chatId);
     }
     return await sendMessage(env, chatId, "❌ Dirección inválida. Debe empezar por 0x y tener 42 caracteres.");
   }
@@ -180,6 +181,7 @@ async function handleMedia(env, msg) {
     const pending = await env.KV.get(`verify_state:${telegramId}`);
     if (pending === "waiting_video") {
       await env.KV.delete(`verify_state:${telegramId}`);
+      await env.KV.delete(`verify_code:${telegramId}`);
       await sendMessage(env, chatId, "⏳ Verificando tu video...");
       try {
         const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
@@ -190,8 +192,9 @@ async function handleMedia(env, msg) {
         formData.append("model", "whisper-large-v3");
         const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { "Authorization": `Bearer ${env.GROQ_API_KEY}` }, body: formData }).then(r => r.json());
         const transcription = (groqRes.text || "").toLowerCase();
+        const savedCode = await env.KV.get(`verify_code:${telegramId}`);
         const hasAge = transcription.includes("18") || transcription.includes("dieciocho") || transcription.includes("mayor");
-        const hasCode = transcription.includes("4921") || transcription.includes("cuatro nueve dos uno");
+        const hasCode = savedCode && (transcription.includes(savedCode) || transcription.includes(savedCode.split('').join(' ')));
         if (hasAge && hasCode) {
           const code = Math.random().toString(36).substring(2, 6);
           await env.DB.prepare("INSERT INTO creators (telegram_id, username, display_name, start_code, verified, active) VALUES (?, ?, ?, ?, 1, 1)").bind(telegramId, msg.from.username || "sin_user", msg.from.first_name || "Creadora", code).run();
@@ -233,16 +236,30 @@ async function handleCallback(cb, env) {
   if (data === "faq_renew") return await sendMessageWithButtons(env, chatId, "Tu suscripción dura 30 días. Toca 'Suscribirme' de nuevo y envía 1 USDT.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
   if (data === "faq_net") return await sendMessageWithButtons(env, chatId, "Debes enviar USDT por la red *BNB Smart Chain (BEP20)*.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
   if (data === "faq_human") return await sendMessageWithButtons(env, chatId, "Escribe tu problema y un administrador te responderá.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
-  if (data === "fan_menu") return await sendMenuFan(env, chatId);
-  if (data === "report_post") return await sendMessage(env, chatId, "✅ Denuncia enviada. Un administrador revisará el contenido.");
+  if (data === "fan_menu") {
+  await env.KV.delete(`state:${telegramId}`);
+  return await sendMenuFan(env, chatId);
+}
+  if (data === "report_post") {
+  const post = await env.DB.prepare("SELECT creator_id, message_id FROM posts WHERE message_id = ?").bind(cb.message.message_id).first();
+  if (post) {
+    const creator = await env.DB.prepare("SELECT display_name FROM creators WHERE id = ?").bind(post.creator_id).first();
+    await sendMessage(env, ADMIN_ID, `🚨 *NUEVA DENUNCIA*\n\nFan: @${cb.from.username || "sin_user"}\nCreadora: ${creator ? creator.display_name : "Desconocida"}\nPost ID: ${post.message_id}`);
+  }
+  return await sendMessage(env, chatId, "✅ Denuncia enviada. Un administrador revisará el contenido.");
+}
 
   // === CREADORA ===
-  if (data === "become_creator") {
-    const state = await env.KV.get("config:creator_registration") || "open";
-    if (state === "paused") return await sendMessage(env, chatId, "⏳ El registro está cerrado temporalmente.");
-    await env.KV.put(`verify_state:${telegramId}`, "waiting_video", { expirationTtl: 3600 });
-    return await sendMessageWithButtons(env, chatId, "🎬 *Verificación*\n\nEnvía una Nota de Video (el círculo) diciendo: *\"Soy [tu nombre], mi código es 4921, tengo más de 18 años\"* y pásate los dedos por la cara.", [[{ text: "🔙 Cancelar", callback_data: "creator_menu" }]]);
-  }
+  iif (data === "become_creator") {
+  const state = await env.KV.get("config:creator_registration") || "open";
+  if (state === "paused") return await sendMessage(env, chatId, "⏳ El registro está cerrado temporalmente.");
+  
+  const randomCode = Math.floor(1000 + Math.random() * 9000).toString();
+  await env.KV.put(`verify_code:${telegramId}`, randomCode, { expirationTtl: 3600 });
+  await env.KV.put(`verify_state:${telegramId}`, "waiting_video", { expirationTtl: 3600 });
+  
+  return await sendMessageWithButtons(env, chatId, `🎬 *Verificación*\n\nEnvía una Nota de Video diciendo: *"Soy [tu nombre], mi código es ${randomCode}, tengo más de 18 años"* y pásate los dedos por la cara.`, [[{ text: "🔙 Cancelar", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_upload") { 
     await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
     return await sendMessageWithButtons(env, chatId, "📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video.\n\n✅ *Permitido:* Redes, hashtags, pedir apoyo con Estrellas (⭐).\n❌ *Prohibido:* CSAM, bestialidad, no consensuado.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
@@ -296,8 +313,18 @@ async function handleCallback(cb, env) {
     const txt = `📚 *Guía Rápida*\n\n1. Configura tu Wallet.\n2. Sube contenido (mínimo 3 por semana).\n3. Comparte tu enlace de fans.\n4. Cobra el día 1 de cada mes.`;
     return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
   }
-  if (data === "creator_support") return await sendMessageWithButtons(env, chatId, "🆘 *Soporte*\nEntra al grupo para dudas y avisos de pago.", [[{ text: "🚪 Ir al Grupo", url: "https://t.me/+EWpRI3PN7-Y4ZDEx" }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
-  if (data === "creator_menu") return await sendMenuCreator(env, chatId);
+  if (data === "creator_support") {
+  const groupLink = await createInviteLink(env, env.CREATORS_GROUP_ID, `creator_${telegramId}_${Date.now()}`);
+  if (!groupLink) return await sendMessage(env, chatId, "❌ Error generando enlace. Avisa al admin.");
+  return await sendMessageWithButtons(env, chatId, "🆘 *Soporte*\nEntra al grupo para dudas y avisos de pago.", [[{ text: "🚪 Ir al Grupo", url: groupLink }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+}
+  if (data === "creator_menu") {
+  await env.KV.delete(`state:${telegramId}`);
+  await env.KV.delete(`upload_state:${telegramId}`);
+  await env.KV.delete(`verify_state:${telegramId}`);
+  await env.KV.delete(`verify_code:${telegramId}`);
+  return await sendMenuCreator(env, chatId);
+}
 
   // === ADMIN ===
   if (data === "admin_menu") return await sendMenuAdmin(env, chatId);
@@ -334,7 +361,7 @@ async function handleCallback(cb, env) {
     const p = await env.DB.prepare("SELECT c.display_name, p.amount_usdt, p.tx_hash FROM payments p JOIN creators c ON c.id = p.creator_id WHERE p.subscriber_id = p.creator_id LIMIT ? OFFSET ?").bind(limit, offset).all();
     
     let t = `💵 *Pagos a Creadoras (Pág ${page + 1})*\n\n`; 
-    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  Hash: \`${x.tx_hash.slice(0, 10)}...\`\n`; 
+    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  [Ver en BscScan](https://bscscan.com/tx/${x.tx_hash})\n`; 
     if (p.results.length === 0) t += "No hay pagos registrados.";
     
     const buttons = [];
