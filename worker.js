@@ -529,4 +529,4 @@ async function sendMenuAdmin(env, chatId) {
     [{ text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
-                               }
+}
