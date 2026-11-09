@@ -179,37 +179,47 @@ async function handleMedia(env, msg) {
   }
   if (msg.video_note) {
     const pending = await env.KV.get(`verify_state:${telegramId}`);
-    if (pending === "waiting_video") {
-      await env.KV.delete(`verify_state:${telegramId}`);
-      await env.KV.delete(`verify_code:${telegramId}`);
-      await sendMessage(env, chatId, "⏳ Verificando tu video...");
-      try {
-        const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
-        const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`;
-        const audioBlob = await fetch(fileUrl).then(r => r.blob());
-        const formData = new FormData();
-        formData.append("file", audioBlob, "video.mp4");
-        formData.append("model", "whisper-large-v3");
-        const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { "Authorization": `Bearer ${env.GROQ_API_KEY}` }, body: formData }).then(r => r.json());
-        const transcription = (groqRes.text || "").toLowerCase();
-        const savedCode = await env.KV.get(`verify_code:${telegramId}`);
-        const hasAge = transcription.includes("18") || transcription.includes("dieciocho") || transcription.includes("mayor");
-        const hasCode = savedCode && (transcription.includes(savedCode) || transcription.includes(savedCode.split('').join(' ')));
-        if (hasAge && hasCode) {
-          const code = Math.random().toString(36).substring(2, 6);
-          await env.DB.prepare("INSERT INTO creators (telegram_id, username, display_name, start_code, verified, active) VALUES (?, ?, ?, ?, 1, 1)").bind(telegramId, msg.from.username || "sin_user", msg.from.first_name || "Creadora", code).run();
-          await sendMessageWithButtons(env, chatId, `✅ *¡Verificación exitosa!*\n\nYa eres creadora oficial.`, [[{ text: "🎨 Ir a mi menú", callback_data: "creator_menu" }]]);
-          await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: ADMIN_ID, from_chat_id: chatId, message_id: msg.message_id }) });
-          await sendMessage(env, ADMIN_ID, `🚨 Nueva creadora verificada: ${msg.from.first_name} (@${msg.from.username})`);
-          return;
-        } else {
-          await sendMessage(env, chatId, "❌ No pudimos verificar tu video. Asegúrate de decir el código 4921 y que eres mayor de 18.");
-          return;
-        }
-      } catch (e) { await sendMessage(env, chatId, "⚠️ Error técnico verificando tu video. Inténtalo de nuevo en 5 minutos."); }
+  if (pending === "waiting_video") {
+   await env.KV.delete(`verify_state:${telegramId}`);
+   const savedCode = await env.KV.get(`verify_code:${telegramId}`);
+   await env.KV.delete(`verify_code:${telegramId}`);
+   await sendMessage(env, chatId, "⏳ Verificando tu video...");
+   try {
+   
+   const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
+   const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`;
+   const audioBlob = await fetch(fileUrl).then(r => r.blob());
+    
+    const formData = new FormData();
+    formData.append("file", audioBlob, "video.mp4");
+    formData.append("model", "whisper-large-v3");
+    
+    const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { "Authorization": `Bearer ${env.GROQ_API_KEY}` }, body: formData }).then(r => r.json());
+    
+    const transcription = (groqRes.text || "").toLowerCase();
+    const hasAge = transcription.includes("18") || transcription.includes("dieciocho") || transcription.includes("mayor");
+    const hasCode = savedCode && (transcription.includes(savedCode) || transcription.includes(savedCode.split('').join(' ')));
+    
+    if (hasAge && hasCode) {
+      const code = Math.random().toString(36).substring(2, 6);
+      await env.DB.prepare("INSERT INTO creators (telegram_id, username, display_name, start_code, verified, active) VALUES (?, ?, ?, ?, 1, 1)").bind(telegramId, msg.from.username || "sin_user", msg.from.first_name || "Creadora", code).run();
+      
+      await sendMessageWithButtons(env, chatId, `✅ *¡Verificación exitosa!*\n\nYa eres creadora oficial.`, [[{ text: "🎨 Ir a mi menú", callback_data: "creator_menu" }]]);
+      
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: ADMIN_ID, from_chat_id: chatId, message_id: msg.message_id }) });
+      await sendMessage(env, ADMIN_ID, `🚨 Nueva creadora verificada: ${msg.from.first_name} (@${msg.from.username})`);
+      return;
+    } else {
+      await sendMessage(env, chatId, "❌ No pudimos verificar tu video. Asegúrate de decir el código que te dimos y que eres mayor de 18.");
+      return;
+    }
+  } catch (e) { 
+    await sendMessage(env, chatId, "⚠️ Error técnico verificando tu video. Inténtalo de nuevo en 5 minutos."); 
+  }
     }
   }
 }
+
 async function handleCallback(cb, env) {
   const chatId = cb.message.chat.id, telegramId = cb.from.id, data = cb.data;
   await answerCallback(env, cb.id);
@@ -250,7 +260,7 @@ async function handleCallback(cb, env) {
 }
 
   // === CREADORA ===
-  iif (data === "become_creator") {
+  if (data === "become_creator") {
   const state = await env.KV.get("config:creator_registration") || "open";
   if (state === "paused") return await sendMessage(env, chatId, "⏳ El registro está cerrado temporalmente.");
   
@@ -314,7 +324,8 @@ async function handleCallback(cb, env) {
     return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
   }
   if (data === "creator_support") {
-  const groupLink = await createInviteLink(env, env.CREATORS_GROUP_ID, `creator_${telegramId}_${Date.now()}`);
+  const groupLinkRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/createChatInviteLink`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, name: `creator_${telegramId}` }) }).then(x => x.json());
+  const groupLink = groupLinkRes.ok ? groupLinkRes.result.invite_link : null;
   if (!groupLink) return await sendMessage(env, chatId, "❌ Error generando enlace. Avisa al admin.");
   return await sendMessageWithButtons(env, chatId, "🆘 *Soporte*\nEntra al grupo para dudas y avisos de pago.", [[{ text: "🚪 Ir al Grupo", url: groupLink }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
 }
