@@ -114,8 +114,8 @@ async function handleUpdate(update, env) {
     if (reaction.chat.id.toString() === channelId) {
       const post = await env.DB.prepare("SELECT creator_id FROM posts WHERE message_id = ?").bind(reaction.message_id).first();
       if (post) {
-        const newStars = reaction.new_reaction.filter(r => r.type === 'paid').length;
-        const oldStars = reaction.old_reaction.filter(r => r.type === 'paid').length;
+        const newStars = reaction.new_reaction.length;
+        const oldStars = reaction.old_reaction.length;
         const diff = newStars - oldStars;
         if (diff !== 0) {
           const now = new Date();
@@ -529,4 +529,4 @@ async function sendMenuAdmin(env, chatId) {
     [{ text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
-}
+                               }
