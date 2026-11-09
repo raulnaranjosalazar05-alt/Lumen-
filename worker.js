@@ -185,8 +185,12 @@ async function handleMedia(env, msg) {
    await env.KV.delete(`verify_code:${telegramId}`);
    await sendMessage(env, chatId, "⏳ Verificando tu video...");
    try {
-   
-   const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
+// Verificamos el peso del video antes de descargarlo (25 MB máximo)
+if (msg.video_note.file_size > 25 * 1024 * 1024) {
+  return await sendMessage(env, chatId, "❌ El video es muy pesado (más de 25 MB). Por favor, grábame una nota de video más corta (de 10 a 15 segundos) para poder verificarte.");
+}
+
+const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
    const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`;
    const audioBlob = await fetch(fileUrl).then(r => r.blob());
     
@@ -253,8 +257,12 @@ async function handleCallback(cb, env) {
   if (data === "report_post") {
   const post = await env.DB.prepare("SELECT creator_id, message_id FROM posts WHERE message_id = ?").bind(cb.message.message_id).first();
   if (post) {
-    const creator = await env.DB.prepare("SELECT display_name FROM creators WHERE id = ?").bind(post.creator_id).first();
-    await sendMessage(env, ADMIN_ID, `🚨 *NUEVA DENUNCIA*\n\nFan: @${cb.from.username || "sin_user"}\nCreadora: ${creator ? creator.display_name : "Desconocida"}\nPost ID: ${post.message_id}`);
+    const creator = await env.DB.prepare("SELECT display_name, telegram_id FROM creators WHERE id = ?").bind(post.creator_id).first();
+    
+    // Te enviamos el aviso CON BOTÓN para banear
+    await sendMessageWithButtons(env, ADMIN_ID, `🚨 *NUEVA DENUNCIA*\n\nFan: @${cb.from.username || "sin_user"}\nCreadora: ${creator ? creator.display_name : "Desconocida"}\nID Creadora: \`${creator ? creator.telegram_id : "0"}\`\nPost ID: ${post.message_id}`, [
+      [{ text: "🚫 Banear Creadora", callback_data: `admin_ban_${creator ? creator.telegram_id : 0}` }]
+    ]);
   }
   return await sendMessage(env, chatId, "✅ Denuncia enviada. Un administrador revisará el contenido.");
 }
@@ -271,9 +279,9 @@ async function handleCallback(cb, env) {
   return await sendMessageWithButtons(env, chatId, `🎬 *Verificación*\n\nEnvía una Nota de Video diciendo: *"Soy [tu nombre], mi código es ${randomCode}, tengo más de 18 años"* y pásate los dedos por la cara.`, [[{ text: "🔙 Cancelar", callback_data: "creator_menu" }]]);
 }
   if (data === "creator_upload") { 
-    await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
-    return await sendMessageWithButtons(env, chatId, "📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video.\n\n✅ *Permitido:* Redes, hashtags, pedir apoyo con Estrellas (⭐).\n❌ *Prohibido:* CSAM, bestialidad, no consensuado.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
-  }
+  await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
+  return await sendMessageWithButtons(env, chatId, `📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video. Se publicará al instante en el canal VIP.\n\n✅ *Qué puedes incluir:*\n• *Enlaces a tus redes:* Instagram, TikTok, OnlyFans, etc.\n• *Hashtags (#):* Para que los fans encuentren tu contenido.\n• *Apoyo con Estrellas (⭐):* Puedes pedir a tus fans que te envíen Estrellas como muestra de apoyo. Estas se acumulan a tu favor para el bono de calidad.\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.`, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
+}
   if (data === "creator_panel") {
     const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
     const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
@@ -306,28 +314,68 @@ async function handleCallback(cb, env) {
     return await sendMessageWithButtons(env, chatId, "🔗 *Acceso al Canal*", [[{ text: "🚪 Entrar al Canal", url: link }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
   }
   if (data === "creator_ref_link") { 
-    const c = await env.DB.prepare("SELECT start_code FROM creators WHERE telegram_id = ?").bind(telegramId).first(); 
+  try {
+    let c = await env.DB.prepare("SELECT start_code FROM creators WHERE telegram_id = ?").bind(telegramId).first(); 
+    
+    // AUTO-REPARACIÓN: Si no tiene start_code, se lo generamos y guardamos
+    if (!c || !c.start_code) {
+      const newCode = "ref" + Math.random().toString(36).substring(2, 6);
+      await env.DB.prepare("UPDATE creators SET start_code = ? WHERE telegram_id = ?").bind(newCode, telegramId).run();
+      c = { start_code: newCode };
+    }
+
     const me = await getMe(env); 
-    const msg = `🎯 *Enlace para fans*\n\nComparte este enlace en tus redes:\n\nhttps://t.me/${me.username}?start=${c.start_code}`;
-    return await sendMessageWithButtonsAndCopy(env, chatId, msg, `https://t.me/${me.username}?start=${c.start_code}`, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
+    const botUsername = me && me.username ? me.username : "LumenVipBot"; // Fallback por si getMe falla
+    const link = `https://t.me/${botUsername}?start=${c.start_code}`;
+    
+    const msg = `🎯 *Enlace para fans*\n\nToca el botón de abajo para copiar tu enlace:`;
+    
+    return await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, { 
+      method: "POST", 
+      headers: { "content-type": "application/json" }, 
+      body: JSON.stringify({ 
+        chat_id: chatId, 
+        text: msg, 
+        parse_mode: "Markdown", 
+        reply_markup: { 
+          inline_keyboard: [
+            [{ text: "📋 Copiar mi enlace", copy_text: { text: link } }],
+            [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]
+          ]
+        } 
+      }) 
+    }).then(r => r.json());
+    
+  } catch (e) {
+    // Si aún así falla, te avisa a ti pero NO a la creadora con tecnicismos
+    await sendMessage(env, ADMIN_ID, `🚨 Error en enlace de fans (ID ${telegramId}): ${e.message}`);
+    return await sendMessageWithButtons(env, chatId, "⏳ Estamos teniendo un problema técnico. Inténtalo más tarde.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
   }
+}
   if (data === "creator_norms") {
-    const txt = `📜 *Normas y Privacidad*\n\n✅ *Permitido:* Todo el contenido legal para adultos, enlaces a redes y pedir Estrellas.\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• CSAM\n• Bestialidad\n• No consensuado\n• Enlaces a otros canales/bots de Telegram.\n\n🔒 *Privacidad:* Tus datos solo se usan para pagos.`;
-    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
-  }
+  const txt = `📜 *Normas y Privacidad*\n\n✅ *Permitido:*\nTodo el contenido legal para adultos (fotos, videos, desnudos, explícito).\nEnlaces a redes sociales (Instagram, TikTok, OnlyFans, etc.).\nHashtags y peticiones de apoyo con Estrellas (⭐).\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.\n• Enlaces a otros canales o bots de Telegram.\n\n🔒 *Privacidad:*\nTus datos (ID de Telegram y wallet) solo se usan para gestionar tus pagos. No se comparten con terceros.`;
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "✅ Acepto", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_calc") {
-    const txt = `🧮 *Transparencia de Ganancias*\n\n*1. Comisión por Fans:*\n• 1-99: 50%\n• 100-499: 60%\n• 500-999: 70%\n• 1,000-4,999: 80%\n• +5,000: 90%\n\n*2. Bono por Calidad (Estrellas de cualquier fan):*\n• Índice 1.0-1.9: 🥉 Bronce (5%)\n• Índice 2.0-2.9: 🥈 Plata (10%)\n• Índice 3.0-3.9: 🥇 Oro (20%)\n• Índice 4.0-4.9: 💎 Diamante (30%)\n• Índice 5.0+: 👑 Leyenda (40%)\n\n*3. Pago:* El día 1 de cada mes automático a tu wallet.`;
-    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
-  }
+  const txt = `🧮 *Transparencia de Ganancias*\n\n*1. Comisión por Fans:*\nCobras un porcentaje de cada suscripción de 1 USDT que traigas. El porcentaje sube según cuántos fans activos tengas:\n• 1 a 99 fans: *50%* (0.50 USDT por fan)\n• 100 a 499 fans: *60%* (0.60 USDT por fan)\n• 500 a 999 fans: *70%* (0.70 USDT por fan)\n• 1,000 a 4,999 fans: *80%* (0.80 USDT por fan)\n• Más de 5,000 fans: *90%* (0.90 USDT por fan)\n\n*2. Bono por Calidad (Estrellas):*\nEl Índice de Calidad se calcula dividiendo *todas las Estrellas (⭐) que recibas en el mes (de cualquier fan, sin importar quién te trajo)* entre tus fans activos. Este bono sale del margen del dueño, no te quita tu comisión:\n• Índice 0 a 0.99: *Sin bono*\n• Índice 1.0 a 1.99: *🥉 Bronce (5%)*\n• Índice 2.0 a 2.99: *🥈 Plata (10%)*\n• Índice 3.0 a 3.99: *🥇 Oro (20%)*\n• Índice 4.0 a 4.99: *💎 Diamante (30%)*\n• Índice 5.0 o más: *👑 Leyenda (40%)*\n\n*3. Pago:*\nEl día 1 de cada mes se te envía automáticamente a tu wallet de USDT (BEP20).`;
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_tutorial") {
-    const txt = `📚 *Guía Rápida*\n\n1. Configura tu Wallet.\n2. Sube contenido (mínimo 3 por semana).\n3. Comparte tu enlace de fans.\n4. Cobra el día 1 de cada mes.`;
-    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
-  }
+  const txt = `📚 *Guía Rápida para Creadoras*\n\n*1. Configura tu Wallet:* Ve a "🏦 Mi Wallet" y envía tu dirección USDT (BEP20) para recibir tus pagos.\n\n*2. Sube tu contenido:* Toca "📤 Subir Contenido". Envía fotos o videos. El bot los publicará en el canal VIP.\n\n*3. Consigue Fans:* Usa "🎯 Enlace Fans" para copiar tu enlace único. Compártelo en tus redes (Instagram, TikTok, etc.). Cada fan que entre por ahí contará para tus ganancias.\n\n*4. Mira tus Ganancias:* En "💰 Mis Ganancias" verás cuánto llevas acumulado. Recuerda que el día 1 de cada mes recibes tu pago automático.\n\n*5. Calidad:* En "🧮 Cómo se calcula" tienes todas las reglas de comisiones y el bono por Estrellas.`;
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_support") {
-  const groupLinkRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/createChatInviteLink`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, name: `creator_${telegramId}` }) }).then(x => x.json());
-  const groupLink = groupLinkRes.ok ? groupLinkRes.result.invite_link : null;
-  if (!groupLink) return await sendMessage(env, chatId, "❌ Error generando enlace. Avisa al admin.");
-  return await sendMessageWithButtons(env, chatId, "🆘 *Soporte*\nEntra al grupo para dudas y avisos de pago.", [[{ text: "🚪 Ir al Grupo", url: groupLink }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+  try {
+    const groupLinkRes = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/createChatInviteLink`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, name: `creator_${telegramId}` }) }).then(x => x.json());
+    const groupLink = groupLinkRes.ok ? groupLinkRes.result.invite_link : null;
+    if (!groupLink) throw new Error("No se pudo crear el enlace");
+    
+    const txt = `🆘 *Soporte para Creadoras*\n\nEste es tu espacio de ayuda. Entra al grupo para:\n• Resolver dudas técnicas (subir contenido, enlaces, wallet).\n• Ver los avisos de pago con su hash de transacción.\n• Hablar con el administrador y con otras creadoras.`;
+    
+    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🚪 Entrar al Grupo de Creadoras", url: groupLink }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+  } catch (e) {
+    return await sendMessageWithButtons(env, chatId, "⏳ El grupo de soporte no está disponible en este momento. Inténtalo más tarde.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+  }
 }
   if (data === "creator_menu") {
   await env.KV.delete(`state:${telegramId}`);
@@ -382,7 +430,33 @@ async function handleCallback(cb, env) {
     return await sendMessageWithButtons(env, chatId, t, buttons);
   }
   if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env); // Ir a la página 1
-
+  if (data.startsWith("admin_ban_")) {
+  const creatorId = data.split("_")[2];
+  const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(creatorId).first();
+  
+  if (creator) {
+    // 1. Expulsar del canal
+    const channelId = await env.KV.get("config:channel_id");
+    if (channelId) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: creatorId }) });
+    }
+    
+    // 2. Expulsar del grupo de creadoras
+    if (env.CREATORS_GROUP_ID) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: creatorId }) });
+    }
+    
+    // 3. Desactivar en la base de datos (no le pagará este mes)
+    await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(creatorId).run();
+    
+    // 4. Avisarte a ti y avisarle a ella
+    await sendMessage(env, ADMIN_ID, `✅ Creadora ${creator.display_name} baneada y desactivada.`);
+    await sendMessage(env, creatorId, "🚫 Has sido expulsada de Lumen VIP por incumplimiento de las normas. Se ha cancelado tu monetización de este mes.");
+  } else {
+    await sendMessage(env, ADMIN_ID, "⚠️ No se encontró a la creadora en la base de datos.");
+  }
+  return;
+}
   if (data === "admin_pause") { 
     const st = await env.KV.get("config:creator_registration") || "open"; 
     if (st === "open") { 
@@ -407,6 +481,32 @@ async function sendMessageWithButtonsAndCopy(env, chatId, text, textToCopy, butt
 async function answerCallback(env, id) { return fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ callback_query_id: id }) }).then(r => r.json()); }
 function json(obj, status = 200) { return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }); }
 
-async function sendMenuFan(env, chatId) { await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [[{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],[{ text: "📊 Mi Estado", callback_data: "status" }, { text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],[{ text: "🆘 Soporte", callback_data: "support_fan" }]]); }
-async function sendMenuCreator(env, chatId) { await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [[{ text: "📤 Subir Contenido", callback_data: "creator_upload" }],[{ text: "📊 Mi Panel", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],[{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }, { text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],[{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }, { text: "📜 Normas", callback_data: "creator_norms" }],[{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }],[{ text: "📚 Tutorial", callback_data: "creator_tutorial" }, { text: "🆘 Soporte", callback_data: "creator_support" }]]); }
-async function sendMenuAdmin(env, chatId) { const state = await env.KV.get("config:creator_registration") || "open"; const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [[{ text: "📈 Estadísticas Generales", callback_data: "admin_stats" }],[{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],[{ text: pauseBtn, callback_data: "admin_pause" }]]); }
+async function sendMenuFan(env, chatId) { 
+  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
+  await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
+    [{ text: "💎 Suscribirme — 1 USDT" + space, callback_data: "subscribe" }],
+    [{ text: "📊 Mi Estado" + space, callback_data: "status" }, { text: "📚 ¿Cómo funciona?" + space, callback_data: "how_it_works" }],
+    [{ text: "🆘 Soporte" + space, callback_data: "support_fan" }]
+  ]); 
+}
+async function sendMenuCreator(env, chatId) { 
+  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
+  await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
+    [{ text: "📤 Subir Contenido" + space, callback_data: "creator_upload" }],
+    [{ text: "📊 Mi Panel" + space, callback_data: "creator_panel" }, { text: "💰 Mis Ganancias" + space, callback_data: "creator_earnings" }],
+    [{ text: "🏦 Mi Wallet" + space, callback_data: "creator_wallet" }, { text: "🔗 Enlace Canal" + space, callback_data: "creator_channel_link" }],
+    [{ text: "🎯 Enlace Fans" + space, callback_data: "creator_ref_link" }, { text: "📜 Normas" + space, callback_data: "creator_norms" }],
+    [{ text: "🧮 Cómo se calcula" + space, callback_data: "creator_calc" }],
+    [{ text: "📚 Tutorial" + space, callback_data: "creator_tutorial" }, { text: "🆘 Soporte" + space, callback_data: "creator_support" }]
+  ]); 
+}
+async function sendMenuAdmin(env, chatId) { 
+  const state = await env.KV.get("config:creator_registration") || "open"; 
+  const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
+  const space = "\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B";
+  await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
+    [{ text: "📈 Estadísticas Generales" + space, callback_data: "admin_stats" }],
+    [{ text: "👥 Gestionar Creadoras" + space, callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos" + space, callback_data: "admin_payments" }],
+    [{ text: pauseBtn + space, callback_data: "admin_pause" }]
+  ]); 
+}
