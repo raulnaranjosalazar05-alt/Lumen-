@@ -143,6 +143,36 @@ async function handleUpdate(update, env) {
     }
     return await sendMessage(env, chatId, "❌ Dirección inválida. Debe empezar por 0x y tener 42 caracteres.");
   }
+  if (state === "awaiting_ban_id") {
+  await cleanChat(env, chatId, msg.message_id);
+  
+  if (text === "/cancelar") {
+    await env.KV.delete(`state:${telegramId}`);
+    return await sendMessage(env, chatId, "❌ Baneo cancelado.");
+  }
+  
+  const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(text).first();
+  if (creator) {
+    // 1. Banear del canal
+    const channelId = await env.KV.get("config:channel_id");
+    if (channelId) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: text }) });
+    }
+    
+    // 2. Banear del grupo de creadoras
+    if (env.CREATORS_GROUP_ID) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: text }) });
+    }
+    
+    // 3. Desactivar en la base de datos
+    await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(text).run();
+    
+    await env.KV.delete(`state:${telegramId}`);
+    return await sendMessage(env, chatId, `✅ Creadora ${creator.display_name} baneada y desactivada correctamente.`);
+  } else {
+    return await sendMessage(env, chatId, "❌ No se encontró ninguna creadora con ese ID. Inténtalo de nuevo o escribe /cancelar.");
+  }
+}
   const startMatch = text.match(/^\/start(?:\s+(.+))?$/);
   if (startMatch) { await cleanChat(env, chatId, msg.message_id); return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim()); }
   await cleanChat(env, chatId, msg.message_id);
@@ -406,6 +436,10 @@ async function handleCallback(cb, env) {
 
   // === ADMIN ===
   if (data === "admin_menu") return await sendMenuAdmin(env, chatId);
+  if (data === "admin_ban_prompt") {
+  await env.KV.put(`state:${telegramId}`, "awaiting_ban_id", { expirationTtl: 3600 });
+  return await sendMessage(env, chatId, "🚫 Para banear a una creadora, envíame su ID de Telegram (el número que aparece en la lista).\n\n*Escribe /cancelar para salir.*");
+}
   if (data.startsWith("admin_ignore_")) {
   const msgId = data.split("_")[2];
   await env.DB.prepare("DELETE FROM reports WHERE message_id = ?").bind(msgId).run();
@@ -447,31 +481,51 @@ async function handleCallback(cb, env) {
   }
   
   const buttons = [];
-  if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
-  if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
-  buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
-  return await sendMessageWithButtons(env, chatId, t, buttons);
+if (page > 0) buttons.push([{ text: "⬅️ Página Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
+if ((page + 1) * limit < total.n) buttons.push([{ text: "Página Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
+buttons.push([{ text: "🚫 Banear Creadora por ID", callback_data: "admin_ban_prompt" }]);
+buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
+return await sendMessageWithButtons(env, chatId, t, buttons);
 }
   if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env); // Ir a la página 1
   
   // Paginación Pagos
-  if (data.startsWith("admin_payments_page_")) {
-    const page = parseInt(data.split("_")[3]) || 0;
-    const limit = 5;
-    const offset = page * limit;
-    const total = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE subscriber_id = creator_id").first(); // Pagos reales a creadoras
-    const p = await env.DB.prepare("SELECT c.display_name, p.amount_usdt, p.tx_hash FROM payments p JOIN creators c ON c.id = p.creator_id WHERE p.subscriber_id = p.creator_id LIMIT ? OFFSET ?").bind(limit, offset).all();
-    
-    let t = `💵 *Pagos a Creadoras (Pág ${page + 1})*\n\n`; 
-    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  [Ver en BscScan](https://bscscan.com/tx/${x.tx_hash})\n`; 
-    if (p.results.length === 0) t += "No hay pagos registrados.";
-    
-    const buttons = [];
-    if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_payments_page_${page - 1}` }]);
-    if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_payments_page_${page + 1}` }]);
-    buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
-    return await sendMessageWithButtons(env, chatId, t, buttons);
+if (data.startsWith("admin_payments_page_")) {
+  const page = parseInt(data.split("_")[3]) || 0;
+  const limit = 5;
+  const offset = page * limit;
+  
+  const now = new Date();
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  
+  // Resumen del mes
+  const fanPayments = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ? AND subscriber_id != creator_id").bind(period).first();
+  const totalRecaudado = fanPayments.n * 1.0;
+  const totalCreadoras = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ? AND subscriber_id = creator_id").bind(period).first();
+  
+  // Lista de pagos a creadoras
+  const p = await env.DB.prepare("SELECT c.display_name, p.amount_usdt, p.tx_hash FROM payments p JOIN creators c ON c.id = p.creator_id WHERE p.subscriber_id = p.creator_id LIMIT ? OFFSET ?").bind(limit, offset).all();
+  
+  let t = `💵 *Ingresos y Pagos (Pág ${page + 1})*\n\n`;
+  t += `📅 Mes: ${period}\n`;
+  t += `👤 Fans que pagaron: ${fanPayments.n}\n`;
+  t += `💰 Total recaudado: ${totalRecaudado.toFixed(2)} USDT\n`;
+  t += `💸 Pagos a creadoras: ${totalCreadoras.n}\n\n`;
+  
+  if (p.results.length > 0) {
+    t += `*Últimos pagos a creadoras:*\n`;
+    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  [Ver en BscScan](https://bscscan.com/tx/${x.tx_hash})\n`;
+  } else {
+    t += "No hay pagos a creadoras registrados este mes.";
   }
+  
+  const buttons = [];
+  if (page > 0) buttons.push([{ text: "⬅️ Página anterior", callback_data: `admin_payments_page_${page - 1}` }]);
+  if ((page + 1) * limit < totalCreadoras.n) buttons.push([{ text: "Página siguiente ➡️", callback_data: `admin_payments_page_${page + 1}` }]);
+  buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
+  
+  return await sendMessageWithButtons(env, chatId, t, buttons);
+}
   if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env); // Ir a la página 1
   if (data.startsWith("admin_ban_")) {
   const creatorId = data.split("_")[2];
