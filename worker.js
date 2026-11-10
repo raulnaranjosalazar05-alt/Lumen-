@@ -167,7 +167,7 @@ if (activeSub) {
 } else {
   await sendMenuFan(env, chatId);
 }
-
+}
 async function handleMedia(env, msg) {
   const chatId = msg.chat.id, telegramId = msg.from.id;
   const uploadState = await env.KV.get(`upload_state:${telegramId}`);
