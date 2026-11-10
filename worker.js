@@ -27,28 +27,48 @@ export default {
     ctx.waitUntil(checkExpirations(env));
     ctx.waitUntil(checkWeeklyActivity(env));
     ctx.waitUntil(checkMonthlyPayouts(env));
+    ctx.waitUntil(checkReminders(env));
   }
 };
 
 async function checkPayments(env) {
   const pending = await env.DB.prepare("SELECT * FROM subscriptions WHERE status = 'pending'").all();
   if (!pending.results || pending.results.length === 0) return;
+  
   const data = "0x70a08231" + MASTER_WALLET.slice(2).padStart(64, '0'); 
   const res = await fetch(RPC_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: USDT_CONTRACT, data: data }, "latest"] }) }).then(r => r.json());
   if (!res.result) return;
   const balance = parseInt(res.result, 16) / 1e18;
+  
   if (balance >= pending.results.length * 1.0) {
     for (const sub of pending.results) {
       const now = new Date();
-      const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-      await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
+      
+      // Comprobamos si ya tenía una suscripción activa antes de este pago
+      const activeSub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = ? AND status = 'active' ORDER BY expires_at DESC LIMIT 1").bind(sub.subscriber_id).first();
+      
+      let newExpires;
+      if (activeSub && new Date(activeSub.expires_at) > now) {
+        // Renovación anticipada: sumamos 30 días a su vencimiento actual
+        newExpires = new Date(new Date(activeSub.expires_at).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+        // Marcamos la anterior como expirada (o la actualizamos)
+        await env.DB.prepare("UPDATE subscriptions SET status = 'expired' WHERE id = ?").bind(activeSub.id).run();
+      } else {
+        // Suscripción nueva: 30 días desde hoy
+        newExpires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      }
+      
+      await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), newExpires, sub.id).run();
+      
       const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${sub.subscriber_id}_${Date.now()}`);
       const fan = await env.DB.prepare("SELECT telegram_id FROM subscribers WHERE id = ?").bind(sub.subscriber_id).first();
-      if (fan && link) await sendMessageWithButtons(env, fan.telegram_id, `✅ *¡Pago recibido!*\n\nAquí tienes tu acceso:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+      
+      if (fan && link) {
+        await sendMessageWithButtons(env, fan.telegram_id, `✅ *¡Pago recibido!*\n\nAquí tienes tu acceso:\n\n_⏱ Tu suscripción vence en 30 días (horario UTC)._`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+      }
     }
   }
 }
-
 async function checkExpirations(env) {
   const channelId = await env.KV.get("config:channel_id");
   if (!channelId) return;
@@ -64,11 +84,21 @@ async function checkExpirations(env) {
 async function checkWeeklyActivity(env) {
   const creators = await env.DB.prepare("SELECT * FROM creators WHERE active = 1 AND id > 1").all();
   const now = new Date();
+  
   for (const c of creators.results) {
     const diffDays = Math.floor((now - new Date(c.created_at)) / (1000 * 60 * 60 * 24));
+    
+    // Revisamos cada 7 días a las 12:00 UTC
     if (diffDays > 0 && diffDays % 7 === 0 && now.getUTCHours() === 12) {
       const posts = await env.DB.prepare("SELECT COUNT(*) as n FROM posts WHERE creator_id = ? AND created_at >= datetime('now', '-7 days')").bind(c.id).first();
-      if (posts.n < 3) await sendMessage(env, c.telegram_id, `⚠️ Solo has subido ${posts.n} publicaciones esta semana. Necesitas mínimo 3 para mantener tu monetización.`);
+      
+      if (posts.n < 3) {
+        // No cumplió: le sumamos 1 semana de penalización
+        await env.DB.prepare("UPDATE creators SET penalty_weeks = penalty_weeks + 1 WHERE id = ?").bind(c.id).run();
+        
+        // Le avisamos
+        await sendMessage(env, c.telegram_id, `⚠️ *Aviso de Monetización*\n\nSolo has subido ${posts.n} publicaciones esta semana. Necesitas mínimo 3.\n\nHas acumulado una penalización del 10% para este mes.`);
+      }
     }
   }
 }
@@ -87,20 +117,35 @@ async function checkMonthlyPayouts(env) {
     const creator = await env.DB.prepare("SELECT * FROM creators WHERE id = ?").bind(row.creator_id).first();
     if (!creator || !creator.wallet_address) { await sendMessage(env, ADMIN_ID, `⚠️ Creadora ${creator.display_name} no tiene wallet.`); continue; }
     const fans = row.total_subs;
-    let pct = fans >= 5000 ? 0.90 : fans >= 1000 ? 0.80 : fans >= 500 ? 0.70 : fans >= 100 ? 0.60 : 0.50;
-    const commission = fans * 1.0 * pct;
-    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(creator.id, period).first();
-    const totalStars = stars ? stars.total_stars : 0;
-    const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
-    let bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
-    const ownerMargin = fans * 1.0 * (1 - pct);
-    const totalToPay = commission + (ownerMargin * bonusPct);
-    if (totalToPay < 0.10) continue;
+let pct = fans >= 5000 ? 0.90 : fans >= 1000 ? 0.80 : fans >= 500 ? 0.70 : fans >= 100 ? 0.60 : 0.50;
+
+// Aplicamos la penalización por semanas inactivas
+const penalty = creator.penalty_weeks || 0;
+const penaltyAmount = penalty * 0.10; // 10% por cada semana
+pct = pct - penaltyAmount;
+if (pct < 0) pct = 0; // Evitamos que sea negativo
+
+const commission = fans * 1.0 * pct;
+
+const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(creator.id, period).first();
+const totalStars = stars ? stars.total_stars : 0;
+const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
+
+// Si tiene penalización, pierde el bono de calidad
+let bonusPct = 0;
+if (penalty === 0) {
+  bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
+}
+
+const ownerMargin = fans * 1.0 * (1 - pct);
+const totalToPay = commission + (ownerMargin * bonusPct);
     try {
       const { request } = await publicClient.simulateContract({ address: USDT_CONTRACT, abi: [{ name: 'transfer', type: 'function', inputs: [{ name: 'to', type: 'address' }, { name: 'amount', type: 'uint256' }] }], functionName: 'transfer', args: [creator.wallet_address, parseUnits(totalToPay.toFixed(2), 18)], account });
       const hash = await client.writeContract(request);
       await env.DB.prepare("INSERT INTO payments (subscriber_id, creator_id, amount_usdt, period, tx_hash) VALUES (?, ?, ?, ?, ?)").bind(creator.id, creator.id, totalToPay, period, hash).run();
-      const msg = `💰 *Pago Realizado - ${period}*\n\n*Creadora:* ${creator.display_name}\n*Monto:* ${totalToPay.toFixed(2)} USDT\n*Hash:* \`${hash}\``;
+      // Reseteamos las penalizaciones para el próximo mes
+      await env.DB.prepare("UPDATE creators SET penalty_weeks = 0 WHERE id = ?").bind(creator.id).run();
+      const msg = `💰 *Pago Realizado - ${period}*\n\n*Creadora:* ${creator.display_name}\n*Monto:* ${totalToPay.toFixed(2)} USDT\n*Hash:* \`${hash}\`\n\n_Enviado automáticamente el día 1 de cada mes (12:00 UTC)._`;
       await sendMessage(env, creator.telegram_id, msg);
       if (env.CREATORS_GROUP_ID) { const sent = await sendMessage(env, env.CREATORS_GROUP_ID, msg); try { await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/pinChatMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, message_id: sent.result.message_id }) }); } catch(e){} }
     } catch (e) { await sendMessage(env, ADMIN_ID, `❌ Error pagando a ${creator.display_name}: ${e.message}`); }
@@ -276,8 +321,13 @@ async function handleCallback(cb, env) {
   const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
   if (!sub) return;
   await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
-  const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.`;
+  const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.\n\n_⏱ El sistema revisa los pagos cada minuto (horario UTC)._`;
   return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+}
+if (data === "renew_sub") {
+  // Le mostramos la misma dirección de pago, pero el mensaje es de renovación
+  const msg = `💎 *Renovación de Suscripción*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nAl detectar el pago, sumaremos 30 días a tu vencimiento actual.\n\n_⏱ El sistema revisa los pagos cada minuto (horario UTC)._`;
+  return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
 }
   if (data === "status") {
     const sub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
@@ -338,10 +388,16 @@ async function handleCallback(cb, env) {
   return await sendMessageWithButtons(env, chatId, `📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video. Se publicará al instante en el canal VIP.\n\n✅ *Qué puedes incluir:*\n• *Enlaces a tus redes:* Instagram, TikTok, OnlyFans, etc.\n• *Hashtags (#):* Para que los fans encuentren tu contenido.\n• *Apoyo con Estrellas (⭐):* Puedes pedir a tus fans que te envíen Estrellas como muestra de apoyo. Estas se acumulan a tu favor para el bono de calidad.\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]); 
 }
   if (data === "creator_panel") {
-    const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
-    const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
-    return await sendMessageWithButtons(env, chatId, `📊 *Mi Panel*\n\nFans: ${f.t}\nEstado: ${c.verified ? "✅ Verificada" : "⏳ Pendiente"}`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
+  const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
+  const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
+  
+  let penaltyText = "";
+  if (c.penalty_weeks > 0) {
+    penaltyText = `\n⚠️ *Penalización activa:* -${c.penalty_weeks * 10}% de comisión y *pérdida de calidad* este mes.`;
   }
+  
+  return await sendMessageWithButtons(env, chatId, `📊 *Mi Panel*\n\nFans: ${f.t}\nEstado: ${c.verified ? "✅ Verificada" : "⏳ Pendiente"}${penaltyText}`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_earnings") {
     const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
     const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
@@ -408,8 +464,8 @@ async function handleCallback(cb, env) {
   }
 }
   if (data === "creator_norms") {
-  const txt = `📜 *Normas y Privacidad*\n\n✅ *Permitido:*\nTodo el contenido legal para adultos (fotos, videos, desnudos, explícito).\nEnlaces a redes sociales (Instagram, TikTok, OnlyFans, etc.).\nHashtags y peticiones de apoyo con Estrellas (⭐).\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.\n• Enlaces a otros canales o bots de Telegram.\n\n🔒 *Privacidad:*\nTus datos (ID de Telegram y wallet) solo se usan para gestionar tus pagos. No se comparten con terceros.`;
-  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "✅ Acepto", callback_data: "creator_menu" }]]);
+  const txt = `📜 *Normas y Privacidad*\n\n✅ *Permitido:*\nTodo el contenido legal para adultos (fotos, videos, desnudos, explícito).\nEnlaces a redes sociales (Instagram, TikTok, OnlyFans, etc.).\nHashtags y peticiones de apoyo con Estrellas (⭐).\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.\n• Enlaces a otros canales o bots de Telegram.\n\n⚠️ *Regla de Monetización:*\nDebes subir un mínimo de *3 publicaciones cada 7 días*. \nSi fallas una semana, perderás un *10% de tu comisión* y el *bono de calidad* de ese mes. Las penalizaciones son acumulativas (si fallas 2 semanas, pierdes el 20%).\n\n🔒 *Privacidad:*\nTus datos (ID de Telegram y wallet) solo se usan para gestionar tus pagos. No se comparten con terceros.`;
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
 }
   if (data === "creator_calc") {
   const txt = `🧮 *Transparencia de Ganancias*\n\n*1. Comisión por Fans:*\nCobras un porcentaje de cada suscripción de 1 USDT que traigas. El porcentaje sube según cuántos fans activos tengas:\n• 1 a 99 fans: *50%* (0.50 USDT por fan)\n• 100 a 499 fans: *60%* (0.60 USDT por fan)\n• 500 a 999 fans: *70%* (0.70 USDT por fan)\n• 1,000 a 4,999 fans: *80%* (0.80 USDT por fan)\n• Más de 5,000 fans: *90%* (0.90 USDT por fan)\n\n*2. Bono por Calidad (Estrellas):*\nEl Índice de Calidad se calcula dividiendo *todas las Estrellas (⭐) que recibas en el mes (de cualquier fan, sin importar quién te trajo)* entre tus fans activos. Este bono sale del margen del dueño, no te quita tu comisión:\n• Índice 0 a 0.99: *Sin bono*\n• Índice 1.0 a 1.99: *🥉 Bronce (5%)*\n• Índice 2.0 a 2.99: *🥈 Plata (10%)*\n• Índice 3.0 a 3.99: *🥇 Oro (20%)*\n• Índice 4.0 a 4.99: *💎 Diamante (30%)*\n• Índice 5.0 o más: *👑 Leyenda (40%)*\n\n*3. Pago:*\nEl día 1 de cada mes se te envía automáticamente a tu wallet de USDT (BEP20).`;
@@ -595,6 +651,7 @@ async function sendMenuFan(env, chatId) {
 async function sendMenuFanActive(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👋 *¡Hola de nuevo, Fan VIP!*\n\nTu suscripción está activa. ¿Qué quieres hacer hoy?", [
     [{ text: "📊 Ver mi Estado de Suscripción", callback_data: "status" }],
+    [{ text: "💎 Renovar mi Suscripción por 1 USDT", callback_data: "renew_sub" }],
     [{ text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }, { text: "🆘 Soporte y Ayuda", callback_data: "support_fan" }],
     [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }]
   ]); 
@@ -617,4 +674,32 @@ async function sendMenuAdmin(env, chatId) {
     [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
+}
+async function checkReminders(env) {
+  const now = new Date();
+  
+  // Buscamos suscripciones activas que vencen en 1, 3 o 7 días
+  const subscriptions = await env.DB.prepare("SELECT s.*, u.telegram_id FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE s.status = 'active'").all();
+  
+  for (const sub of subscriptions.results) {
+    const expires = new Date(sub.expires_at);
+    const diffDays = Math.ceil((expires - now) / (1000 * 60 * 60 * 24));
+    
+    let daysToWarn = 0;
+    if (diffDays === 7) daysToWarn = 7;
+    if (diffDays === 3) daysToWarn = 3;
+    if (diffDays === 1) daysToWarn = 1;
+    
+    if (daysToWarn > 0) {
+      // Comprobamos si ya le hemos enviado este aviso
+      const kvKey = `reminder_${sub.subscriber_id}_${daysToWarn}`;
+      const alreadySent = await env.KV.get(kvKey);
+      
+      if (!alreadySent) {
+        // Enviamos el aviso y guardamos el candado en KV (caduca en 2 días)
+        await sendMessage(env, sub.telegram_id, `⏳ *Aviso de Vencimiento*\n\nTu suscripción a Lumen VIP vence en *${daysToWarn} días*.\n\nPara no perder el acceso al contenido de todas las creadoras, puedes renovar ahora por 1 USDT.\n\n_(Los avisos se envían a las 12:00 UTC)._`);
+        await env.KV.put(kvKey, "sent", { expirationTtl: 172800 }); // 2 días de caducidad
+      }
+    }
+  }
 }
