@@ -156,8 +156,15 @@ async function handleStart(env, chatId, telegramId, username, startCode) {
   if (existing) await env.DB.prepare("UPDATE subscribers SET username = ?, referred_by = ? WHERE telegram_id = ?").bind(username, referredBy, telegramId).run();
   else await env.DB.prepare("INSERT INTO subscribers (telegram_id, username, referred_by) VALUES (?, ?, ?)").bind(telegramId, username, referredBy).run();
   const role = await getRole(env, telegramId);
-  if (role === "admin") return await sendMenuAdmin(env, chatId);
-  if (role === "creator") return await sendMenuCreator(env, chatId);
+if (role === "admin") return await sendMenuAdmin(env, chatId);
+if (role === "creator") return await sendMenuCreator(env, chatId);
+
+// Comprobamos si es un fan con suscripción activa
+const activeSub = await env.DB.prepare("SELECT * FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
+
+if (activeSub) {
+  await sendMenuFanActive(env, chatId);
+} else {
   await sendMenuFan(env, chatId);
 }
 
@@ -239,8 +246,8 @@ async function handleCallback(cb, env) {
     const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
     if (!sub) return;
     await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
-    const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.`;
-    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+    const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:`;
+    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
   }
   if (data === "status") {
     const sub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
@@ -523,6 +530,13 @@ async function sendMenuFan(env, chatId) {
     [{ text: "📊 Mi Estado de Suscripción", callback_data: "status" }, { text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }],
     [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }],
     [{ text: "🆘 Soporte", callback_data: "support_fan" }]
+  ]); 
+}
+async function sendMenuFanActive(env, chatId) { 
+  await sendMessageWithButtons(env, chatId, "👋 *¡Hola de nuevo, Fan VIP!*\n\nTu suscripción está activa. ¿Qué quieres hacer hoy?", [
+    [{ text: "📊 Ver mi Estado de Suscripción", callback_data: "status" }],
+    [{ text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }, { text: "🆘 Soporte y Ayuda", callback_data: "support_fan" }],
+    [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }]
   ]); 
 }
 async function sendMenuCreator(env, chatId) { 
