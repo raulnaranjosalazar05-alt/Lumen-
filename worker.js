@@ -273,20 +273,20 @@ async function handleCallback(cb, env) {
 
   // === FAN ===
   if (data === "subscribe") {
-    const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
-    if (!sub) return;
-    await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
-    const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:`;
-    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
-  }
+  const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
+  if (!sub) return;
+  await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
+  const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.`;
+  return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+}
   if (data === "status") {
     const sub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
     if (!sub) return await sendMessageWithButtons(env, chatId, "📭 No tienes suscripción activa.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
     const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
     return await sendMessageWithButtons(env, chatId, `✅ Activa hasta: *${sub.expires_at}*`, [[{ text: "🚪 Entrar al Canal VIP", url: link }], [{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
   }
-  if (data === "how_it_works") return await sendMessageWithButtons(env, chatId, "📚 *¿Cómo funciona?*\n\nPagas 1 USDT al mes y entras al canal VIP. Verás a TODAS las creadoras.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
-  if (data === "support_fan") return await sendMessageWithButtons(env, chatId, "🆘 *Centro de Ayuda*", [[{ text: "⏳ No me llega el enlace", callback_data: "faq_wait" }],[{ text: "💰 He pagado pero no tengo acceso", callback_data: "faq_pay" }],[{ text: "📅 ¿Cómo renuevo?", callback_data: "faq_renew" }],[{ text: "🌐 ¿En qué red envío?", callback_data: "faq_net" }],[{ text: "👤 Hablar con administrador", callback_data: "faq_human" }],[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+  if (data === "how_it_works") return await sendMessageWithButtons(env, chatId, "📚 *¿Cómo funciona Lumen VIP?*\n\nPagas **1 USDT al mes** y obtienes acceso total e inmediato a nuestro canal VIP.\n\n✅ *¿Qué incluye tu suscripción?*\n• Acceso al contenido exclusivo de **TODAS** las creadoras de la plataforma.\n• No tienes que pagar suscripciones individuales por cada creadora.\n• El acceso es por 30 días. Cuando vence, puedes volver a renovar si quieres seguir disfrutando del contenido.\n• No hay cobros automáticos, tú decides cuándo renovar.\n\n💎 *¿Cómo empiezo?*\nToca el botón de \"Suscribirme\", envía 1 USDT a la dirección que te dará el bot, y en 1 minuto recibirás tu enlace de acceso automático.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+  if (data === "support_fan") return await sendMessageWithButtons(env, chatId, "🆘 *Centro de Ayuda*", [[{ text: "⏳ No me llega el enlace de acceso", callback_data: "faq_wait" }],[{ text: "💰 He pagado pero no tengo acceso", callback_data: "faq_pay" }],[{ text: "📅 ¿Cómo renuevo mi suscripción?", callback_data: "faq_renew" }],[{ text: "🌐 ¿En qué red debo enviar el USDT?", callback_data: "faq_net" }],[{ text: "👤 Hablar con un administrador", callback_data: "faq_human" }],[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
   if (data === "faq_wait") return await sendMessageWithButtons(env, chatId, "El sistema revisa pagos cada minuto. Espera 2 minutos y revisa 'Mi Estado'.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "faq_pay") return await sendMessageWithButtons(env, chatId, "Asegúrate de enviar 1 USDT o más a la wallet mostrada.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "faq_renew") return await sendMessageWithButtons(env, chatId, "Tu suscripción dura 30 días. Toca 'Suscribirme' de nuevo y envía 1 USDT.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
@@ -294,7 +294,13 @@ async function handleCallback(cb, env) {
   if (data === "faq_human") return await sendMessageWithButtons(env, chatId, "Escribe tu problema y un administrador te responderá.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "fan_menu") {
   await env.KV.delete(`state:${telegramId}`);
-  return await sendMenuFan(env, chatId);
+  // Comprobamos si sigue suscrito antes de mostrar el menú
+  const activeSub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
+  if (activeSub) {
+    return await sendMenuFanActive(env, chatId);
+  } else {
+    return await sendMenuFan(env, chatId);
+  }
 }
   if (data === "report_post") {
   const post = await env.DB.prepare("SELECT creator_id, message_id FROM posts WHERE message_id = ?").bind(cb.message.message_id).first();
