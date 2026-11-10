@@ -44,14 +44,8 @@ async function checkPayments(env) {
       await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
       const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${sub.subscriber_id}_${Date.now()}`);
       const fan = await env.DB.prepare("SELECT telegram_id FROM subscribers WHERE id = ?").bind(sub.subscriber_id).first();
-      if (fan && link) {
-  const paymentMsgId = await env.KV.get(`payment_msg:${fan.telegram_id}`);
-  if (paymentMsgId) {
-    await cleanChat(env, fan.telegram_id, paymentMsgId);
-    await env.KV.delete(`payment_msg:${fan.telegram_id}`);
-  }
-  await sendMessageWithButtons(env, fan.telegram_id, `✅ *¡Pago recibido!*\n\nAquí tienes tu acceso:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
-}
+      if (fan && link) await sendMessageWithButtons(env, fan.telegram_id, `✅ *¡Pago recibido!*\n\nAquí tienes tu acceso:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+    }
   }
 }
 
@@ -242,24 +236,12 @@ async function handleCallback(cb, env) {
 
   // === FAN ===
   if (data === "subscribe") {
-  const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
-  if (!sub) return;
-  
-  let creatorId = 1; 
-  if (sub.referred_by) {
-    const creator = await env.DB.prepare("SELECT id FROM creators WHERE start_code = ?").bind(sub.referred_by).first();
-    if (creator) creatorId = creator.id;
+    const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
+    if (!sub) return;
+    await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
+    const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.`;
+    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
   }
-  
-  await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, ?, datetime('now'), datetime('now'), 'pending')").bind(sub.id, creatorId).run();
-  
-  const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:`;
-  const sent = await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
-  
-  // Guardamos el ID del mensaje de pago en KV para borrarlo luego
-  await env.KV.put(`payment_msg:${telegramId}`, sent.result.message_id);
-  return;
-}
   if (data === "status") {
     const sub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
     if (!sub) return await sendMessageWithButtons(env, chatId, "📭 No tienes suscripción activa.", [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
@@ -537,27 +519,33 @@ function json(obj, status = 200) { return new Response(JSON.stringify(obj), { st
 
 async function sendMenuFan(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
-    [{ text: "💎 Suscribirme — 1 USDT (Mensual)", callback_data: "subscribe" }],
-    [{ text: "📊 Mi Estado de Suscripción", callback_data: "status" }, { text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }],
-    [{ text: "🆘 Soporte y Ayuda", callback_data: "support_fan" }]
+    [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
+    [{ text: "📊 Mi Estado", callback_data: "status" }],
+    [{ text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],
+    [{ text: "🆘 Soporte", callback_data: "support_fan" }]
   ]); 
 }
 async function sendMenuCreator(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
-    [{ text: "📤 Subir Contenido al Canal VIP", callback_data: "creator_upload" }],
-    [{ text: "📊 Mi Panel de Rendimiento", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias Acumuladas", callback_data: "creator_earnings" }],
-    [{ text: "🏦 Mi Wallet de Pagos", callback_data: "creator_wallet" }, { text: "🔗 Enlace de Acceso al Canal", callback_data: "creator_channel_link" }],
-    [{ text: "🎯 Enlace de Captación para Fans", callback_data: "creator_ref_link" }, { text: "📜 Normas y Privacidad", callback_data: "creator_norms" }],
-    [{ text: "🧮 Cómo se Calculan las Ganancias", callback_data: "creator_calc" }],
-    [{ text: "📚 Guía y Tutorial de la Creadora", callback_data: "creator_tutorial" }, { text: "🆘 Soporte Técnico", callback_data: "creator_support" }]
+    [{ text: "📤 Subir Contenido", callback_data: "creator_upload" }],
+    [{ text: "📊 Mi Panel", callback_data: "creator_panel" }],
+    [{ text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],
+    [{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }],
+    [{ text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],
+    [{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }],
+    [{ text: "📜 Normas", callback_data: "creator_norms" }],
+    [{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }],
+    [{ text: "📚 Tutorial", callback_data: "creator_tutorial" }],
+    [{ text: "🆘 Soporte", callback_data: "creator_support" }]
   ]); 
 }
 async function sendMenuAdmin(env, chatId) { 
   const state = await env.KV.get("config:creator_registration") || "open"; 
   const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
   await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
-    [{ text: "📈 Estadísticas Generales y Reportes", callback_data: "admin_stats" }],
-    [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
-    [{ text: pauseBtn + " del Sistema", callback_data: "admin_pause" }]
+    [{ text: "📈 Estadísticas Generales", callback_data: "admin_stats" }],
+    [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }],
+    [{ text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
+    [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
 }
