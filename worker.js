@@ -32,44 +32,61 @@ export default {
 };
 
 async function checkPayments(env) {
-  const pending = await env.DB.prepare("SELECT * FROM subscriptions WHERE status = 'pending'").all();
-  if (!pending.results || pending.results.length === 0) return;
+  // Buscamos el último bloque escaneado (o empezamos desde el actual si es la primera vez)
+  let lastBlock = await env.KV.get("last_scanned_block");
+  const currentBlockRes = await fetch(RPC_URL, { 
+    method: "POST", headers: { "content-type": "application/json" }, 
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }) 
+  }).then(r => r.json());
   
-  const data = "0x70a08231" + MASTER_WALLET.slice(2).padStart(64, '0'); 
-  const res = await fetch(RPC_URL, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: USDT_CONTRACT, data: data }, "latest"] }) }).then(r => r.json());
-  if (!res.result) return;
-  const balance = parseInt(res.result, 16) / 1e18;
+  if (!currentBlockRes.result) return;
+  const currentBlock = parseInt(currentBlockRes.result, 16);
+
+  if (!lastBlock) {
+    // Si es la primera vez, empezamos desde 5 bloques atrás para no perder nada
+    lastBlock = currentBlock - 5;
+  } else {
+    lastBlock = parseInt(lastBlock);
+  }
+
+  if (currentBlock <= lastBlock) return; // No hay bloques nuevos
+
+  // El topic de tu wallet (para filtrar solo las transferencias hacia ti)
+  const walletTopic = "0x000000000000000000000000" + MASTER_WALLET.slice(2).toLowerCase();
   
-  if (balance >= pending.results.length * 1.0) {
-    for (const sub of pending.results) {
-      const now = new Date();
-      
-      // Comprobamos si ya tenía una suscripción activa antes de este pago
-      const activeSub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = ? AND status = 'active' ORDER BY expires_at DESC LIMIT 1").bind(sub.subscriber_id).first();
-      
-      let newExpires;
-      if (activeSub && new Date(activeSub.expires_at) > now) {
-        // Renovación anticipada: sumamos 30 días a su vencimiento actual
-        newExpires = new Date(new Date(activeSub.expires_at).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-        // Marcamos la anterior como expirada (o la actualizamos)
-        await env.DB.prepare("UPDATE subscriptions SET status = 'expired' WHERE id = ?").bind(activeSub.id).run();
-      } else {
-        // Suscripción nueva: 30 días desde hoy
-        newExpires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-      }
-      
-      await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), newExpires, sub.id).run();
-      
-      const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${sub.subscriber_id}_${Date.now()}`);
-      const fan = await env.DB.prepare("SELECT telegram_id FROM subscribers WHERE id = ?").bind(sub.subscriber_id).first();
-      
-      if (fan && link) {
-        await sendMessageWithButtons(env, fan.telegram_id, `✅ *¡Pago recibido!*\n\nAquí tienes tu acceso:\n\n_⏱ Tu suscripción vence en 30 días (horario UTC)._`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+  // Consultamos los logs de la blockchain
+  const logsRes = await fetch(RPC_URL, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "eth_getLogs",
+      params: [{
+        fromBlock: "0x" + lastBlock.toString(16),
+        toBlock: "0x" + currentBlock.toString(16),
+        address: USDT_CONTRACT,
+        topics: [
+          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Topic de Transfer
+          null, // Desde cualquier wallet
+          walletTopic // Hacia tu wallet
+        ]
+      }]
+    })
+  }).then(r => r.json());
+
+  if (logsRes.result && logsRes.result.length > 0) {
+    for (const log of logsRes.result) {
+      const amount = parseInt(log.data, 16) / 1e18;
+      // Si la transferencia es de al menos 1 USDT, guardamos el hash
+      if (amount >= 1.0) {
+        await env.DB.prepare("INSERT INTO verified_hashes (tx_hash) VALUES (?) ON CONFLICT DO NOTHING").bind(log.transactionHash).run();
       }
     }
   }
+
+  // Guardamos el último bloque escaneado para la próxima vez
+  await env.KV.put("last_scanned_block", currentBlock.toString());
 }
-async function checkExpirations(env) {
+  
+  async function checkExpirations(env) {
   const channelId = await env.KV.get("config:channel_id");
   if (!channelId) return;
   const expired = await env.DB.prepare("SELECT s.*, u.telegram_id FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE s.status = 'active' AND s.expires_at < datetime('now')").all();
@@ -179,6 +196,37 @@ async function handleUpdate(update, env) {
   const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text.trim();
   const state = await env.KV.get(`state:${telegramId}`);
   if (state === "awaiting_wallet") {
+  if (state === "awaiting_hash") {
+  await cleanChat(env, chatId, msg.message_id);
+  
+  // Filtro estricto: solo aceptamos texto con formato de hash
+  if (!msg.text || !text.startsWith("0x") || text.length !== 66) {
+    return await sendMessage(env, chatId, "❌ Formato inválido. Por favor, envíame solo el hash de la transacción (empieza por 0x y tiene 66 caracteres). No acepto fotos, videos ni otro tipo de archivos.");
+  }
+  
+  // Verificamos si el hash está en la base de datos y no ha sido usado
+  const validHash = await env.DB.prepare("SELECT * FROM verified_hashes WHERE tx_hash = ? AND status = 'unused'").bind(text).first();
+  
+  if (!validHash) {
+    return await sendMessage(env, chatId, "❌ El hash no es válido o ya ha sido utilizado. Asegúrate de que has enviado 1 USDT a la dirección correcta y de que el hash es el correcto.");
+  }
+  
+  // El hash es válido. Activamos la suscripción.
+  const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = (SELECT id FROM subscribers WHERE telegram_id = ?) AND status = 'pending'").bind(telegramId).first();
+  
+  if (sub) {
+    const now = new Date();
+    const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    
+    await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
+    await env.DB.prepare("UPDATE verified_hashes SET status = 'used' WHERE id = ?").bind(validHash.id).run();
+    
+    const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
+    await env.KV.delete(`state:${telegramId}`);
+    
+    return await sendMessageWithButtons(env, chatId, `✅ *¡Pago verificado!*\n\nAquí tienes tu acceso al canal VIP:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+  }
+}
     await cleanChat(env, chatId, msg.message_id);
     if (text.startsWith("0x") && text.length === 42) {
       await env.DB.prepare("UPDATE creators SET wallet_address = ? WHERE telegram_id = ?").bind(text, telegramId).run();
@@ -320,9 +368,20 @@ async function handleCallback(cb, env) {
   if (data === "subscribe") {
   const sub = await env.DB.prepare("SELECT * FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
   if (!sub) return;
-  await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
-  const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.\n\n_⏱ El sistema revisa los pagos cada minuto (horario UTC)._`;
-  return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+  
+  let creatorId = 1; 
+  if (sub.referred_by) {
+    const creator = await env.DB.prepare("SELECT id FROM creators WHERE start_code = ?").bind(sub.referred_by).first();
+    if (creator) creatorId = creator.id;
+  }
+  
+  await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, ?, datetime('now'), datetime('now'), 'pending')").bind(sub.id, creatorId).run();
+  
+  // Guardamos el estado de que está esperando el hash
+  await env.KV.put(`state:${telegramId}`, "awaiting_hash", { expirationTtl: 3600 });
+  
+  const msg = `💎 *Suscripción VIP*\n\n1. Envía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\n2. Cuando lo hayas enviado, **pégame aquí el hash de la transacción** (empieza por 0x...).\n\n_⏱ El sistema verificará el hash automáticamente._`;
+  return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
 }
 if (data === "renew_sub") {
   // Le mostramos la misma dirección de pago, pero el mensaje es de renovación
