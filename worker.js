@@ -288,7 +288,7 @@ async function handleCallback(cb, env) {
   await env.KV.put(`verify_code:${telegramId}`, randomCode, { expirationTtl: 3600 });
   await env.KV.put(`verify_state:${telegramId}`, "waiting_video", { expirationTtl: 3600 });
   
-  return await sendMessageWithButtons(env, chatId, `🎬 *Verificación*\n\nEnvía una Nota de Video diciendo: *"Soy [tu nombre], mi código es ${randomCode}, tengo más de 18 años"* y pásate los dedos por la cara.`, [[{ text: "🔙 Cancelar", callback_data: "creator_menu" }]]);
+  return await sendMessageWithButtons(env, chatId, `🎬 *Verificación*\n\nEnvía una Nota de Video...`, [[{ text: "🔙 Cancelar", callback_data: "fan_menu" }]]);
 }
   if (data === "creator_upload") { 
   await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
@@ -527,12 +527,12 @@ async function sendMenuFan(env, chatId) {
 }
 async function sendMenuCreator(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
-    [{ text: "📤 Subir Contenido", callback_data: "creator_upload" }],
-    [{ text: "📊 Mi Panel", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],
-    [{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }, { text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],
-    [{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }, { text: "📜 Normas", callback_data: "creator_norms" }],
-    [{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }, { text: "📚 Tutorial", callback_data: "creator_tutorial" }],
-    [{ text: "🆘 Soporte", callback_data: "creator_support" }]
+    [{ text: "📤 Subir Contenido al Canal VIP", callback_data: "creator_upload" }],
+    [{ text: "📊 Mi Panel de Rendimiento", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias Acumuladas", callback_data: "creator_earnings" }],
+    [{ text: "🏦 Mi Wallet de Pagos", callback_data: "creator_wallet" }, { text: "🔗 Enlace de Acceso al Canal", callback_data: "creator_channel_link" }],
+    [{ text: "🎯 Enlace de Captación para Fans", callback_data: "creator_ref_link" }, { text: "📜 Normas y Privacidad", callback_data: "creator_norms" }],
+    [{ text: "🧮 Cómo se Calculan las Ganancias", callback_data: "creator_calc" }, { text: "📚 Guía y Tutorial de la Creadora", callback_data: "creator_tutorial" }],
+    [{ text: "🆘 Soporte Técnico", callback_data: "creator_support" }]
   ]); 
 }
 async function sendMenuAdmin(env, chatId) { 
