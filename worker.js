@@ -188,48 +188,16 @@ async function handleUpdate(update, env) {
     }
     return;
   }
+
   if (update.callback_query) return await handleCallback(update.callback_query, env);
   const msg = update.message;
   if (!msg) return;
-  if (msg.video_note || msg.photo || msg.video) return await handleMedia(env, msg);
-  if (!msg.text) return;
-  const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text.trim();
-  const state = await env.KV.get(`state:${telegramId}`);
-  if (state === "awaiting_wallet") {
-  return; 
-}         
 
-if (state === "awaiting_hash") {
-  await cleanChat(env, chatId, msg.message_id);
-  
-  // Filtro estricto: solo aceptamos texto con formato de hash
-  if (!msg.text || !text.startsWith("0x") || text.length !== 66) {
-    return await sendMessage(env, chatId, "❌ Formato inválido. Por favor, envíame solo el hash de la transacción (empieza por 0x y tiene 66 caracteres). No acepto fotos, videos ni otro tipo de archivos.");
-  }
-  
-  // Verificamos si el hash está en la base de datos y no ha sido usado
-  const validHash = await env.DB.prepare("SELECT * FROM verified_hashes WHERE tx_hash = ? AND status = 'unused'").bind(text).first();
-  
-  if (!validHash) {
-    return await sendMessage(env, chatId, "❌ El hash no es válido o ya ha sido utilizado. Asegúrate de que has enviado 1 USDT a la dirección correcta y de que el hash es el correcto.");
-  }
-  
-  // El hash es válido. Activamos la suscripción.
-  const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = (SELECT id FROM subscribers WHERE telegram_id = ?) AND status = 'pending'").bind(telegramId).first();
-  
-  if (sub) {
-    const now = new Date();
-    const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-    
-    await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
-    await env.DB.prepare("UPDATE verified_hashes SET status = 'used' WHERE id = ?").bind(validHash.id).run();
-    
-    const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
-    await env.KV.delete(`state:${telegramId}`);
-    
-    return await sendMessageWithButtons(env, chatId, `✅ *¡Pago verificado!*\n\nAquí tienes tu acceso al canal VIP:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
-  }
-}
+  const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text ? msg.text.trim() : "";
+  const state = await env.KV.get(`state:${telegramId}`);
+
+  // 1. ESPERANDO WALLET
+  if (state === "awaiting_wallet") {
     await cleanChat(env, chatId, msg.message_id);
     if (text.startsWith("0x") && text.length === 42) {
       await env.DB.prepare("UPDATE creators SET wallet_address = ? WHERE telegram_id = ?").bind(text, telegramId).run();
@@ -239,38 +207,76 @@ if (state === "awaiting_hash") {
     }
     return await sendMessage(env, chatId, "❌ Dirección inválida. Debe empezar por 0x y tener 42 caracteres.");
   }
+
+  // 2. ESPERANDO HASH
+  if (state === "awaiting_hash") {
+    await cleanChat(env, chatId, msg.message_id);
+    
+    if (!msg.text || !text.startsWith("0x") || text.length !== 66) {
+      return await sendMessage(env, chatId, "❌ Formato inválido. Por favor, envíame solo el hash de la transacción (empieza por 0x y tiene 66 caracteres). No acepto fotos, videos ni otro tipo de archivos.");
+    }
+    
+    const validHash = await env.DB.prepare("SELECT * FROM verified_hashes WHERE tx_hash = ? AND status = 'unused'").bind(text).first();
+    
+    if (!validHash) {
+      return await sendMessage(env, chatId, "❌ El hash no es válido o ya ha sido utilizado. Asegúrate de que has enviado 1 USDT a la dirección correcta y de que el hash es el correcto.");
+    }
+    
+    const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = (SELECT id FROM subscribers WHERE telegram_id = ?) AND status = 'pending'").bind(telegramId).first();
+    
+    if (sub) {
+      const now = new Date();
+      const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      
+      await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
+      await env.DB.prepare("UPDATE verified_hashes SET status = 'used' WHERE id = ?").bind(validHash.id).run();
+      
+      const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
+      await env.KV.delete(`state:${telegramId}`);
+      
+      return await sendMessageWithButtons(env, chatId, `✅ *¡Pago verificado!*\n\nAquí tienes tu acceso al canal VIP:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
+    }
+    return;
+  }
+
+  // 3. ESPERANDO ID PARA BANEAR
   if (state === "awaiting_ban_id") {
-  await cleanChat(env, chatId, msg.message_id);
-  
-  if (text === "/cancelar") {
-    await env.KV.delete(`state:${telegramId}`);
-    return await sendMessage(env, chatId, "❌ Baneo cancelado.");
-  }
-  
-  const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(text).first();
-  if (creator) {
-    // 1. Banear del canal
-    const channelId = await env.KV.get("config:channel_id");
-    if (channelId) {
-      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: text }) });
+    await cleanChat(env, chatId, msg.message_id);
+    
+    if (text === "/cancelar") {
+      await env.KV.delete(`state:${telegramId}`);
+      return await sendMessage(env, chatId, "❌ Baneo cancelado.");
     }
     
-    // 2. Banear del grupo de creadoras
-    if (env.CREATORS_GROUP_ID) {
-      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: text }) });
+    const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(text).first();
+    if (creator) {
+      const channelId = await env.KV.get("config:channel_id");
+      if (channelId) {
+        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: text }) });
+      }
+      if (env.CREATORS_GROUP_ID) {
+        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: text }) });
+      }
+      await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(text).run();
+      await env.KV.delete(`state:${telegramId}`);
+      return await sendMessage(env, chatId, `✅ Creadora ${creator.display_name} baneada y desactivada correctamente.`);
+    } else {
+      return await sendMessage(env, chatId, "❌ No se encontró ninguna creadora con ese ID. Inténtalo de nuevo o escribe /cancelar.");
     }
-    
-    // 3. Desactivar en la base de datos
-    await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(text).run();
-    
-    await env.KV.delete(`state:${telegramId}`);
-    return await sendMessage(env, chatId, `✅ Creadora ${creator.display_name} baneada y desactivada correctamente.`);
-  } else {
-    return await sendMessage(env, chatId, "❌ No se encontró ninguna creadora con ese ID. Inténtalo de nuevo o escribe /cancelar.");
   }
-}
+
+  // 4. FOTOS, VIDEOS Y NOTAS DE VIDEO
+  if (msg.video_note || msg.photo || msg.video) return await handleMedia(env, msg);
+  if (!msg.text) return;
+
+  // 5. COMANDO /START
   const startMatch = text.match(/^\/start(?:\s+(.+))?$/);
-  if (startMatch) { await cleanChat(env, chatId, msg.message_id); return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim()); }
+  if (startMatch) { 
+    await cleanChat(env, chatId, msg.message_id); 
+    return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim()); 
+  }
+  
+  // 6. SOPORTE
   await cleanChat(env, chatId, msg.message_id);
   await sendMessage(env, ADMIN_ID, `🆘 *SOPORTE:* @${msg.from.username || "sin_user"} (ID: ${telegramId}) dice:\n\n"${text}"`);
 }
