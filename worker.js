@@ -520,22 +520,18 @@ function json(obj, status = 200) { return new Response(JSON.stringify(obj), { st
 async function sendMenuFan(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
     [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
-    [{ text: "📊 Mi Estado", callback_data: "status" }],
-    [{ text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],
+    [{ text: "📊 Mi Estado", callback_data: "status" }, { text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],
+    [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }],
     [{ text: "🆘 Soporte", callback_data: "support_fan" }]
   ]); 
 }
 async function sendMenuCreator(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
     [{ text: "📤 Subir Contenido", callback_data: "creator_upload" }],
-    [{ text: "📊 Mi Panel", callback_data: "creator_panel" }],
-    [{ text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],
-    [{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }],
-    [{ text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],
-    [{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }],
-    [{ text: "📜 Normas", callback_data: "creator_norms" }],
-    [{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }],
-    [{ text: "📚 Tutorial", callback_data: "creator_tutorial" }],
+    [{ text: "📊 Mi Panel", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias", callback_data: "creator_earnings" }],
+    [{ text: "🏦 Mi Wallet", callback_data: "creator_wallet" }, { text: "🔗 Enlace Canal", callback_data: "creator_channel_link" }],
+    [{ text: "🎯 Enlace Fans", callback_data: "creator_ref_link" }, { text: "📜 Normas", callback_data: "creator_norms" }],
+    [{ text: "🧮 Cómo se calcula", callback_data: "creator_calc" }, { text: "📚 Tutorial", callback_data: "creator_tutorial" }],
     [{ text: "🆘 Soporte", callback_data: "creator_support" }]
   ]); 
 }
@@ -544,8 +540,7 @@ async function sendMenuAdmin(env, chatId) {
   const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
   await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
     [{ text: "📈 Estadísticas Generales", callback_data: "admin_stats" }],
-    [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }],
-    [{ text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
+    [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
 }
