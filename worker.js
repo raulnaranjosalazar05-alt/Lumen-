@@ -196,7 +196,10 @@ async function handleUpdate(update, env) {
   const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text.trim();
   const state = await env.KV.get(`state:${telegramId}`);
   if (state === "awaiting_wallet") {
-  if (state === "awaiting_hash") {
+  return; 
+}         
+
+if (state === "awaiting_hash") {
   await cleanChat(env, chatId, msg.message_id);
   
   // Filtro estricto: solo aceptamos texto con formato de hash
