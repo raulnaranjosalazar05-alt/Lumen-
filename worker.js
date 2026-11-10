@@ -240,21 +240,21 @@ async function handleCallback(cb, env) {
     if (!sub) return;
     await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, (SELECT id FROM creators WHERE start_code = ?), datetime('now'), datetime('now'), 'pending')").bind(sub.id, sub.referred_by || 'owner').run();
     const msg = `💎 *Suscripción VIP*\n\nEnvía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\nEl acceso es automático.`;
-    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
+    return await sendMessageWithButtonsAndCopy(env, chatId, msg, MASTER_WALLET, [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
   }
   if (data === "status") {
     const sub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active'").bind(telegramId).first();
-    if (!sub) return await sendMessageWithButtons(env, chatId, "📭 No tienes suscripción activa.", [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
+    if (!sub) return await sendMessageWithButtons(env, chatId, "📭 No tienes suscripción activa.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
     const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
-    return await sendMessageWithButtons(env, chatId, `✅ Activa hasta: *${sub.expires_at}*`, [[{ text: "🚪 Entrar al Canal VIP", url: link }], [{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, `✅ Activa hasta: *${sub.expires_at}*`, [[{ text: "🚪 Entrar al Canal VIP", url: link }], [{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
   }
-  if (data === "how_it_works") return await sendMessageWithButtons(env, chatId, "📚 *¿Cómo funciona?*\n\nPagas 1 USDT al mes y entras al canal VIP. Verás a TODAS las creadoras.", [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
-  if (data === "support_fan") return await sendMessageWithButtons(env, chatId, "🆘 *Centro de Ayuda*", [[{ text: "⏳ No me llega el enlace", callback_data: "faq_wait" }],[{ text: "💰 He pagado pero no tengo acceso", callback_data: "faq_pay" }],[{ text: "📅 ¿Cómo renuevo?", callback_data: "faq_renew" }],[{ text: "🌐 ¿En qué red envío?", callback_data: "faq_net" }],[{ text: "👤 Hablar con administrador", callback_data: "faq_human" }],[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
-  if (data === "faq_wait") return await sendMessageWithButtons(env, chatId, "El sistema revisa pagos cada minuto. Espera 2 minutos y revisa 'Mi Estado'.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
-  if (data === "faq_pay") return await sendMessageWithButtons(env, chatId, "Asegúrate de enviar 1 USDT o más a la wallet mostrada.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
-  if (data === "faq_renew") return await sendMessageWithButtons(env, chatId, "Tu suscripción dura 30 días. Toca 'Suscribirme' de nuevo y envía 1 USDT.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
-  if (data === "faq_net") return await sendMessageWithButtons(env, chatId, "Debes enviar USDT por la red *BNB Smart Chain (BEP20)*.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
-  if (data === "faq_human") return await sendMessageWithButtons(env, chatId, "Escribe tu problema y un administrador te responderá.", [[{ text: "🔙 Volver", callback_data: "support_fan" }]]);
+  if (data === "how_it_works") return await sendMessageWithButtons(env, chatId, "📚 *¿Cómo funciona?*\n\nPagas 1 USDT al mes y entras al canal VIP. Verás a TODAS las creadoras.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+  if (data === "support_fan") return await sendMessageWithButtons(env, chatId, "🆘 *Centro de Ayuda*", [[{ text: "⏳ No me llega el enlace", callback_data: "faq_wait" }],[{ text: "💰 He pagado pero no tengo acceso", callback_data: "faq_pay" }],[{ text: "📅 ¿Cómo renuevo?", callback_data: "faq_renew" }],[{ text: "🌐 ¿En qué red envío?", callback_data: "faq_net" }],[{ text: "👤 Hablar con administrador", callback_data: "faq_human" }],[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
+  if (data === "faq_wait") return await sendMessageWithButtons(env, chatId, "El sistema revisa pagos cada minuto. Espera 2 minutos y revisa 'Mi Estado'.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
+  if (data === "faq_pay") return await sendMessageWithButtons(env, chatId, "Asegúrate de enviar 1 USDT o más a la wallet mostrada.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
+  if (data === "faq_renew") return await sendMessageWithButtons(env, chatId, "Tu suscripción dura 30 días. Toca 'Suscribirme' de nuevo y envía 1 USDT.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
+  if (data === "faq_net") return await sendMessageWithButtons(env, chatId, "Debes enviar USDT por la red *BNB Smart Chain (BEP20)*.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
+  if (data === "faq_human") return await sendMessageWithButtons(env, chatId, "Escribe tu problema y un administrador te responderá.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "fan_menu") {
   await env.KV.delete(`state:${telegramId}`);
   return await sendMenuFan(env, chatId);
@@ -282,7 +282,7 @@ async function handleCallback(cb, env) {
   // === CREADORA ===
   if (data === "become_creator") {
   const state = await env.KV.get("config:creator_registration") || "open";
-  if (state === "paused") return await sendMessage(env, chatId, "⏳ El registro está cerrado temporalmente.");
+  if (state === "paused") return await sendMessageWithButtons(env, chatId, "⏳ El registro está cerrado temporalmente.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]]);
   
   const randomCode = Math.floor(1000 + Math.random() * 9000).toString();
   await env.KV.put(`verify_code:${telegramId}`, randomCode, { expirationTtl: 3600 });
@@ -292,12 +292,12 @@ async function handleCallback(cb, env) {
 }
   if (data === "creator_upload") { 
   await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
-  return await sendMessageWithButtons(env, chatId, `📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video. Se publicará al instante en el canal VIP.\n\n✅ *Qué puedes incluir:*\n• *Enlaces a tus redes:* Instagram, TikTok, OnlyFans, etc.\n• *Hashtags (#):* Para que los fans encuentren tu contenido.\n• *Apoyo con Estrellas (⭐):* Puedes pedir a tus fans que te envíen Estrellas como muestra de apoyo. Estas se acumulan a tu favor para el bono de calidad.\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.`, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
+  return await sendMessageWithButtons(env, chatId, `📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video. Se publicará al instante en el canal VIP.\n\n✅ *Qué puedes incluir:*\n• *Enlaces a tus redes:* Instagram, TikTok, OnlyFans, etc.\n• *Hashtags (#):* Para que los fans encuentren tu contenido.\n• *Apoyo con Estrellas (⭐):* Puedes pedir a tus fans que te envíen Estrellas como muestra de apoyo. Estas se acumulan a tu favor para el bono de calidad.\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]); 
 }
   if (data === "creator_panel") {
     const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
     const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
-    return await sendMessageWithButtons(env, chatId, `📊 *Mi Panel*\n\nFans: ${f.t}\nEstado: ${c.verified ? "✅ Verificada" : "⏳ Pendiente"}`, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, `📊 *Mi Panel*\n\nFans: ${f.t}\nEstado: ${c.verified ? "✅ Verificada" : "⏳ Pendiente"}`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
   }
   if (data === "creator_earnings") {
     const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
@@ -312,18 +312,18 @@ async function handleCallback(cb, env) {
     const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
     let bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
     const bonus = ownerMargin * bonusPct;
-    return await sendMessageWithButtons(env, chatId, `💰 *Mis Ganancias*\n\nFans: ${fans}\nComisión: ${(pct*100)}%\nCalidad: ${qualityIndex.toFixed(2)} ⭐\n\nDesglose:\n• Comisión: ${commission.toFixed(2)} USDT\n• Bono: ${bonus.toFixed(2)} USDT\n\n*Total estimado:* ${(commission+bonus).toFixed(2)} USDT`, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, `💰 *Mis Ganancias*\n\nFans: ${fans}\nComisión: ${(pct*100)}%\nCalidad: ${qualityIndex.toFixed(2)} ⭐\n\nDesglose:\n• Comisión: ${commission.toFixed(2)} USDT\n• Bono: ${bonus.toFixed(2)} USDT\n\n*Total estimado:* ${(commission+bonus).toFixed(2)} USDT`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
   }
   if (data === "creator_wallet") { 
     const c = await env.DB.prepare("SELECT wallet_address FROM creators WHERE telegram_id = ?").bind(telegramId).first();
     const hasWallet = c && c.wallet_address;
     const txt = hasWallet ? `🏦 *Mi Wallet*\n\nTu dirección actual es:\n\`${c.wallet_address}\`\n\nSi quieres cambiarla, envíame la nueva dirección por este chat.` : `🏦 *Configura tu Wallet para cobrar*\n\nPara recibir tus pagos, necesitas una wallet.\n1. Descarga una app de abajo.\n2. Busca USDT en red BEP20.\n3. Copia tu dirección (0x...).\n4. Envíamela por este chat.`;
     await env.KV.put(`state:${telegramId}`, "awaiting_wallet", { expirationTtl: 3600 }); 
-    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "📲 SafePal", url: "https://www.safepal.com/download" }, { text: "📲 Trust", url: "https://trustwallet.com/download" }],[{ text: "▶️ Tutorial YouTube", url: "https://www.youtube.com/results?search_query=como+crear+wallet+usdt+bep20" }],[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
+    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "📲 SafePal", url: "https://www.safepal.com/download" }, { text: "📲 Trust", url: "https://trustwallet.com/download" }],[{ text: "▶️ Tutorial YouTube", url: "https://www.youtube.com/results?search_query=como+crear+wallet+usdt+bep20" }],[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]); 
   }
   if (data === "creator_channel_link") { 
     const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `c_${telegramId}_${Date.now()}`); 
-    return await sendMessageWithButtons(env, chatId, "🔗 *Acceso al Canal*", [[{ text: "🚪 Entrar al Canal", url: link }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]); 
+    return await sendMessageWithButtons(env, chatId, "🔗 *Acceso al Canal*", [[{ text: "🚪 Entrar al Canal", url: link }], [{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]); 
   }
   if (data === "creator_ref_link") { 
   try {
@@ -352,7 +352,7 @@ async function handleCallback(cb, env) {
         reply_markup: { 
           inline_keyboard: [
             [{ text: "📋 Copiar mi enlace", copy_text: { text: link } }],
-            [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]
+            [{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]
           ]
         } 
       }) 
@@ -361,7 +361,7 @@ async function handleCallback(cb, env) {
   } catch (e) {
     // Si aún así falla, te avisa a ti pero NO a la creadora con tecnicismos
     await sendMessage(env, ADMIN_ID, `🚨 Error en enlace de fans (ID ${telegramId}): ${e.message}`);
-    return await sendMessageWithButtons(env, chatId, "⏳ Estamos teniendo un problema técnico. Inténtalo más tarde.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, "⏳ Estamos teniendo un problema técnico. Inténtalo más tarde.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
   }
 }
   if (data === "creator_norms") {
@@ -370,11 +370,11 @@ async function handleCallback(cb, env) {
 }
   if (data === "creator_calc") {
   const txt = `🧮 *Transparencia de Ganancias*\n\n*1. Comisión por Fans:*\nCobras un porcentaje de cada suscripción de 1 USDT que traigas. El porcentaje sube según cuántos fans activos tengas:\n• 1 a 99 fans: *50%* (0.50 USDT por fan)\n• 100 a 499 fans: *60%* (0.60 USDT por fan)\n• 500 a 999 fans: *70%* (0.70 USDT por fan)\n• 1,000 a 4,999 fans: *80%* (0.80 USDT por fan)\n• Más de 5,000 fans: *90%* (0.90 USDT por fan)\n\n*2. Bono por Calidad (Estrellas):*\nEl Índice de Calidad se calcula dividiendo *todas las Estrellas (⭐) que recibas en el mes (de cualquier fan, sin importar quién te trajo)* entre tus fans activos. Este bono sale del margen del dueño, no te quita tu comisión:\n• Índice 0 a 0.99: *Sin bono*\n• Índice 1.0 a 1.99: *🥉 Bronce (5%)*\n• Índice 2.0 a 2.99: *🥈 Plata (10%)*\n• Índice 3.0 a 3.99: *🥇 Oro (20%)*\n• Índice 4.0 a 4.99: *💎 Diamante (30%)*\n• Índice 5.0 o más: *👑 Leyenda (40%)*\n\n*3. Pago:*\nEl día 1 de cada mes se te envía automáticamente a tu wallet de USDT (BEP20).`;
-  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
 }
   if (data === "creator_tutorial") {
   const txt = `📚 *Guía Rápida para Creadoras*\n\n*1. Configura tu Wallet:* Ve a "🏦 Mi Wallet" y envía tu dirección USDT (BEP20) para recibir tus pagos.\n\n*2. Sube tu contenido:* Toca "📤 Subir Contenido". Envía fotos o videos. El bot los publicará en el canal VIP.\n\n*3. Consigue Fans:* Usa "🎯 Enlace Fans" para copiar tu enlace único. Compártelo en tus redes (Instagram, TikTok, etc.). Cada fan que entre por ahí contará para tus ganancias.\n\n*4. Mira tus Ganancias:* En "💰 Mis Ganancias" verás cuánto llevas acumulado. Recuerda que el día 1 de cada mes recibes tu pago automático.\n\n*5. Calidad:* En "🧮 Cómo se calcula" tienes todas las reglas de comisiones y el bono por Estrellas.`;
-  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+  return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
 }
   if (data === "creator_support") {
   try {
@@ -384,9 +384,9 @@ async function handleCallback(cb, env) {
     
     const txt = `🆘 *Soporte para Creadoras*\n\nEste es tu espacio de ayuda. Entra al grupo para:\n• Resolver dudas técnicas (subir contenido, enlaces, wallet).\n• Ver los avisos de pago con su hash de transacción.\n• Hablar con el administrador y con otras creadoras.`;
     
-    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🚪 Entrar al Grupo de Creadoras", url: groupLink }], [{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, txt, [[{ text: "🚪 Entrar al Grupo de Creadoras", url: groupLink }], [{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
   } catch (e) {
-    return await sendMessageWithButtons(env, chatId, "⏳ El grupo de soporte no está disponible en este momento. Inténtalo más tarde.", [[{ text: "🔙 Volver al menú", callback_data: "creator_menu" }]]);
+    return await sendMessageWithButtons(env, chatId, "⏳ El grupo de soporte no está disponible en este momento. Inténtalo más tarde.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
   }
 }
   if (data === "creator_menu") {
@@ -414,7 +414,7 @@ async function handleCallback(cb, env) {
   const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
   const income = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ?").bind(period).first();
   
-  return await sendMessageWithButtons(env, chatId, `📈 *Estadísticas Generales*\n\nFans Totales: ${s.n}\nCreadoras Activas: ${c.n}\nSuscripciones Activas: ${act.n}\nIngresos del Mes: ${income.n.toFixed(2)} USDT`, [[{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]]); 
+  return await sendMessageWithButtons(env, chatId, `📈 *Estadísticas Generales*\n\nFans Totales: ${s.n}\nCreadoras Activas: ${c.n}\nSuscripciones Activas: ${act.n}\nIngresos del Mes: ${income.n.toFixed(2)} USDT`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
 }
   
   // Paginación Creadoras
@@ -442,7 +442,7 @@ async function handleCallback(cb, env) {
   const buttons = [];
   if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
   if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
-  buttons.push([{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]);
+  buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
   return await sendMessageWithButtons(env, chatId, t, buttons);
 }
   if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env); // Ir a la página 1
@@ -462,7 +462,7 @@ async function handleCallback(cb, env) {
     const buttons = [];
     if (page > 0) buttons.push([{ text: "⬅️ Anterior", callback_data: `admin_payments_page_${page - 1}` }]);
     if ((page + 1) * limit < total.n) buttons.push([{ text: "Siguiente ➡️", callback_data: `admin_payments_page_${page + 1}` }]);
-    buttons.push([{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]);
+    buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
     return await sendMessageWithButtons(env, chatId, t, buttons);
   }
   if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env); // Ir a la página 1
@@ -497,10 +497,10 @@ async function handleCallback(cb, env) {
     const st = await env.KV.get("config:creator_registration") || "open"; 
     if (st === "open") { 
       await env.KV.put("config:creator_registration", "paused"); 
-      return await sendMessageWithButtons(env, chatId, "⏸️ *Registro Pausado*", [[{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]]); 
+      return await sendMessageWithButtons(env, chatId, "⏸️ *Registro Pausado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
     } else { 
       await env.KV.put("config:creator_registration", "open"); 
-      return await sendMessageWithButtons(env, chatId, "▶️ *Registro Activado*", [[{ text: "🔙 Volver al menú", callback_data: "admin_menu" }]]); 
+      return await sendMessageWithButtons(env, chatId, "▶️ *Registro Activado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
     } 
   }
 }
@@ -520,7 +520,7 @@ function json(obj, status = 200) { return new Response(JSON.stringify(obj), { st
 async function sendMenuFan(env, chatId) { 
   await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
     [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
-    [{ text: "📊 Mi Estado", callback_data: "status" }, { text: "📚 ¿Cómo funciona?", callback_data: "how_it_works" }],
+    [{ text: "📊 Mi Estado de Suscripción", callback_data: "status" }, { text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }],
     [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }],
     [{ text: "🆘 Soporte", callback_data: "support_fan" }]
   ]); 
