@@ -240,8 +240,8 @@ async function handleUpdate(update, env, ctx) {
   }
 
   if (update.callback_query) return await handleCallback(update.callback_query, env, ctx);
-  
-  const msg = update.message;
+
+const msg = update.message;
 if (!msg) return;
 
 const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text ? msg.text.trim() : "";
@@ -252,8 +252,7 @@ if (text === "/test_pago" && telegramId === ADMIN_ID) {
   return await testPayouts(env, chatId);
 }
 
-  const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text ? msg.text.trim() : "";
-  const stateRes = await env.DB.prepare("SELECT state FROM user_states WHERE telegram_id = ?").bind(telegramId).first(); const state = stateRes ? stateRes.state : null;
+const stateRes = await env.DB.prepare("SELECT state FROM user_states WHERE telegram_id = ?").bind(telegramId).first(); const state = stateRes ? stateRes.state : null;
 
   // 1. COMANDO /START (SIEMPRE PRIMERO PARA RESETEAR)
   const startMatch = text.match(/^\/start(?:\s+(.+))?$/);
