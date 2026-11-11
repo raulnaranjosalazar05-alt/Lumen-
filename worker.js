@@ -778,20 +778,23 @@ if (data === "admin_ban_cancel") {
   
   let t = `👥 *Creadoras (Pág ${page + 1})*\n\n`; 
   for (const x of c.results) {
-    // 1. Fans del mes actual (Noviembre)
-    const fansActual = await env.DB.prepare("SELECT COUNT(*) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, currentPeriod).first();
-    
-    // 2. Fans que se van a pagar del mes anterior (Octubre)
-    const fansAnterior = await env.DB.prepare("SELECT COUNT(*) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, prevPeriod).first();
+    // 1. Fans del mes actual 
+    const fansActual = await env.DB.prepare("SELECT SUM(amount_usdt) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, currentPeriod).first();
+
+    // 2. Fans que se van a pagar del mes anterior 
+    const fansAnterior = await env.DB.prepare("SELECT SUM(amount_usdt) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, prevPeriod).first();
 
     // Calidad del mes actual
+    const totalFansActual = fansActual.t || 0;
+    const totalFansAnterior = fansAnterior.t || 0;
+
     const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(x.id, currentPeriod).first();
     const totalStars = stars ? stars.total_stars : 0;
-    const qualityIndex = fansActual.t > 0 ? (totalStars / fansActual.t) : 0;
+    const qualityIndex = totalFansActual > 0 ? (totalStars / totalFansActual) : 0;
     
     t += `• *${x.display_name}*\n`;
-    t += `  👤 Fans Mes Actual (${currentPeriod}): ${fansActual.t}\n`;
-    t += `  💸 A Pagar Mes Anterior (${prevPeriod}): ${fansAnterior.t} fans\n`;
+    t += `  👤 Fans Mes Actual (${currentPeriod}): ${totalFansActual}\n`;
+    t += `  💸 A Pagar Mes Anterior (${prevPeriod}): ${totalFansAnterior} fans\n`;
     t += `  ⭐ Calidad: ${qualityIndex.toFixed(2)}\n\n`; 
   }
   
