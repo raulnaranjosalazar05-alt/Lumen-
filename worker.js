@@ -714,7 +714,8 @@ if (data === "accept_contract") {
 }
 if (data === "admin_ban_cancel") {
   await deleteState(env, telegramId, "state");
-  return await sendMessage(env, chatId, "❌ Baneo cancelado.");
+  await sendMessage(env, chatId, "❌ Baneo cancelado.");
+  return await sendMenuAdmin(env, chatId);
 }
   if (data.startsWith("admin_ignore_")) {
   const msgId = data.split("_")[2];
@@ -763,7 +764,7 @@ if (data === "admin_ban_cancel") {
   return;
 }
   // Paginación Creadoras
-  if (data.startsWith("admin_creators_page_")) {
+    if (data.startsWith("admin_creators_page_")) {
   const page = parseInt(data.split("_")[3]) || 0;
   const limit = 5;
   const offset = page * limit;
@@ -771,25 +772,35 @@ if (data === "admin_ban_cancel") {
   const c = await env.DB.prepare("SELECT * FROM creators WHERE id > 1 AND active = 1 LIMIT ? OFFSET ?").bind(limit, offset).all();
   
   const now = new Date(); 
-  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const currentPeriod = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const prevMonthDate = new Date(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+  const prevPeriod = `${prevMonthDate.getUTCFullYear()}-${String(prevMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
   
   let t = `👥 *Creadoras (Pág ${page + 1})*\n\n`; 
   for (const x of c.results) {
-    // Calculamos fans y estrellas de cada una
-    const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(x.start_code).first();
-    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(x.id, period).first();
-    const totalStars = stars ? stars.total_stars : 0;
-    const qualityIndex = f.t > 0 ? (totalStars / f.t) : 0;
+    // 1. Fans del mes actual (Noviembre)
+    const fansActual = await env.DB.prepare("SELECT COUNT(*) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, currentPeriod).first();
     
-    t += `• *${x.display_name}*\n  Fans: ${f.t} | ⭐ Calidad: ${qualityIndex.toFixed(2)}\n`; 
+    // 2. Fans que se van a pagar del mes anterior (Octubre)
+    const fansAnterior = await env.DB.prepare("SELECT COUNT(*) as t FROM payments WHERE creator_id = ? AND period = ? AND subscriber_id != creator_id").bind(x.id, prevPeriod).first();
+
+    // Calidad del mes actual
+    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(x.id, currentPeriod).first();
+    const totalStars = stars ? stars.total_stars : 0;
+    const qualityIndex = fansActual.t > 0 ? (totalStars / fansActual.t) : 0;
+    
+    t += `• *${x.display_name}*\n`;
+    t += `  👤 Fans Mes Actual (${currentPeriod}): ${fansActual.t}\n`;
+    t += `  💸 A Pagar Mes Anterior (${prevPeriod}): ${fansAnterior.t} fans\n`;
+    t += `  ⭐ Calidad: ${qualityIndex.toFixed(2)}\n\n`; 
   }
   
   const buttons = [];
-if (page > 0) buttons.push([{ text: "⬅️ Página Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
-if ((page + 1) * limit < total.n) buttons.push([{ text: "Página Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
-buttons.push([{ text: "🚫 Banear Creadora por ID", callback_data: "admin_ban_prompt" }]);
-buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
-return await sendMessageWithButtons(env, chatId, t, buttons);
+  if (page > 0) buttons.push([{ text: "⬅️ Página Anterior", callback_data: `admin_creators_page_${page - 1}` }]);
+  if ((page + 1) * limit < total.n) buttons.push([{ text: "Página Siguiente ➡️", callback_data: `admin_creators_page_${page + 1}` }]);
+  buttons.push([{ text: "🚫 Banear Creadora por ID", callback_data: "admin_ban_prompt" }]);
+  buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
+  return await sendMessageWithButtons(env, chatId, t, buttons);
 }
   if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env, ctx); // Ir a la página 1
   
