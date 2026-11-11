@@ -242,9 +242,12 @@ async function handleUpdate(update, env, ctx) {
   if (update.callback_query) return await handleCallback(update.callback_query, env, ctx);
   
   const msg = update.message;
-  if (!msg) return;
-  // Comando secreto para probar pagos (solo admin)
-  if (text === "/test_pago" && telegramId === ADMIN_ID) {
+if (!msg) return;
+
+const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text ? msg.text.trim() : "";
+
+// Comando secreto para probar pagos (solo admin)
+if (text === "/test_pago" && telegramId === ADMIN_ID) {
   await cleanChat(env, chatId, msg.message_id);
   return await testPayouts(env, chatId);
 }
