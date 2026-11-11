@@ -70,65 +70,6 @@ async function verifyTransaction(env, txHash, expectedTo, minAmountUSDT) {
 
   return { ok: false, reason: "no_valid_transfer" };
 }
-async function checkPayments(env) {
-  // Buscamos el último bloque escaneado (o empezamos desde el actual si es la primera vez)
-  const configRes = await env.DB.prepare("SELECT value FROM config WHERE key = 'last_scanned_block'").first(); let lastBlock = configRes ? configRes.value : null;
-  const currentBlockRes = await fetch(RPC_URL, { 
-    method: "POST", headers: { "content-type": "application/json" }, 
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }) 
-  }).then(r => r.json());
-  
-  if (!currentBlockRes.result) return;
-  const currentBlock = parseInt(currentBlockRes.result, 16);
-
-  if (!lastBlock) {
-    // Si es la primera vez, empezamos desde 5 bloques atrás para no perder nada
-    lastBlock = currentBlock - 5;
-  } else {
-    lastBlock = parseInt(lastBlock);
-  }
-
-  if (currentBlock <= lastBlock) return; // No hay bloques nuevos
-  // Límite de seguridad para no saturar el RPC
-  const MAX_BLOCK_RANGE = 500;
-  if (currentBlock - lastBlock > MAX_BLOCK_RANGE) {
-   lastBlock = currentBlock - MAX_BLOCK_RANGE;
-  }
-
-  // El topic de tu wallet (para filtrar solo las transferencias hacia ti)
-  const walletTopic = "0x000000000000000000000000" + MASTER_WALLET.slice(2).toLowerCase();
-  
-  // Consultamos los logs de la blockchain
-  const logsRes = await fetch(RPC_URL, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0", id: 1, method: "eth_getLogs",
-      params: [{
-        fromBlock: "0x" + lastBlock.toString(16),
-        toBlock: "0x" + currentBlock.toString(16),
-        address: USDT_CONTRACT,
-        topics: [
-          "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", // Topic de Transfer
-          null, // Desde cualquier wallet
-          walletTopic // Hacia tu wallet
-        ]
-      }]
-    })
-  }).then(r => r.json());
-
-  if (logsRes.result && logsRes.result.length > 0) {
-    for (const log of logsRes.result) {
-      const rawAmount = BigInt(log.data);
-      const minAmount = parseUnits("1", 18); // 1 USDT en Wei
-      if (rawAmount >= minAmount) {
-        await env.DB.prepare("INSERT INTO verified_hashes (tx_hash, status) VALUES (?, 'unused') ON CONFLICT DO NOTHING").bind(log.transactionHash).run();
-      }
-    }
-  }
-
-  // Guardamos el último bloque escaneado para la próxima vez
-  await env.DB.prepare("INSERT INTO config (key, value) VALUES ('last_scanned_block', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(currentBlock.toString(), currentBlock.toString()).run();
-}
   
   async function checkExpirations(env) {
   const channelId = await env.KV.get("config:channel_id");
@@ -1096,6 +1037,7 @@ async function testPayouts(env, chatId) {
     
     if (totalToPay <= 0) continue;
     totalGeneral += totalToPay;
+
     report += `👩‍🎨 *${creator.display_name}*\n`;
     report += `• Fans: ${fans}\n`;
     report += `• Comisión: ${(pctBase*100)}% ${penalty > 0 ? `(-${penalty*10}% castigo) = ${(pctFinal*100)}%` : ''}\n`;
