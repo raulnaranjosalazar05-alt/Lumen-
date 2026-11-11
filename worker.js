@@ -712,9 +712,8 @@ if (data === "accept_contract") {
     [{ text: "❌ Cancelar Baneo", callback_data: "admin_ban_cancel" }]
   ]);
 }
-if (data === "admin_ban_cancel") {
+  if (data === "admin_ban_cancel") {
   await deleteState(env, telegramId, "state");
-  await sendMessage(env, chatId, "❌ Baneo cancelado.");
   return await sendMenuAdmin(env, chatId);
 }
   if (data.startsWith("admin_ignore_")) {
@@ -808,42 +807,62 @@ if (data === "admin_ban_cancel") {
   if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env, ctx); // Ir a la página 1
   
   // Paginación Pagos
-if (data.startsWith("admin_payments_page_")) {
+  if (data.startsWith("admin_payments_page_")) {
   const page = parseInt(data.split("_")[3]) || 0;
   const limit = 5;
   const offset = page * limit;
   
+  // Calculamos el período del mes actual y del anterior
   const now = new Date();
-  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-  
-  // Resumen del mes
-  const fanPayments = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ? AND subscriber_id != creator_id").bind(period).first();
-  const totalRecaudado = fanPayments.n * 1.0;
-  const totalCreadoras = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ? AND subscriber_id = creator_id").bind(period).first();
-  
-  // Lista de pagos a creadoras
-  const p = await env.DB.prepare("SELECT c.display_name, p.amount_usdt, p.tx_hash FROM payments p JOIN creators c ON c.id = p.creator_id WHERE p.subscriber_id = p.creator_id LIMIT ? OFFSET ?").bind(limit, offset).all();
-  
+  const currentPeriod = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const prevMonthDate = new Date(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+  const prevPeriod = `${prevMonthDate.getUTCFullYear()}-${String(prevMonthDate.getUTCMonth() + 1).padStart(2, '0')}`;
+
+  // 1. Lo recaudado de los fans en el MES ANTERIOR (que es lo que se va a pagar)
+  const ingresosPrev = await env.DB.prepare("SELECT SUM(amount_usdt) as total FROM payments WHERE period = ? AND subscriber_id != creator_id").bind(prevPeriod).first();
+  const totalRecaudadoPrev = ingresosPrev.total || 0;
+
+  // 2. Lo que se va a pagar a las creadoras (los pagos que tienen subscriber_id = creator_id)
+  const pagosPrev = await env.DB.prepare("SELECT SUM(amount_usdt) as total FROM payments WHERE period = ? AND subscriber_id = creator_id").bind(prevPeriod).first();
+  const totalPagadoPrev = pagosPrev.total || 0;
+
+  // 3. Tu ganancia neta del mes anterior
+  const gananciaNeta = totalRecaudadoPrev - totalPagadoPrev;
+
+  // (Opcional) Estadísticas del mes actual
+  const ingresosActual = await env.DB.prepare("SELECT COUNT(*) as n, SUM(amount_usdt) as total FROM payments WHERE period = ? AND subscriber_id != creator_id").bind(currentPeriod).first();
+  const pagosActual = await env.DB.prepare("SELECT COUNT(*) as n FROM payments WHERE period = ? AND subscriber_id = creator_id").bind(currentPeriod).first();
+
   let t = `💵 *Ingresos y Pagos (Pág ${page + 1})*\n\n`;
-  t += `📅 Mes: ${period}\n`;
-  t += `👤 Fans que pagaron: ${fanPayments.n}\n`;
-  t += `💰 Total recaudado: ${totalRecaudado.toFixed(2)} USDT\n`;
-  t += `💸 Pagos a creadoras: ${totalCreadoras.n}\n\n`;
+  
+  t += `📅 *Resumen del mes anterior (${prevPeriod})*\n`;
+  t += `💰 Total recaudado de fans: ${totalRecaudadoPrev.toFixed(2)} USDT\n`;
+  t += `💸 Total pagado a creadoras: ${totalPagadoPrev.toFixed(2)} USDT\n`;
+  t += `🏦 *TU GANANCIA NETA: ${gananciaNeta.toFixed(2)} USDT*\n\n`;
+
+  t += `📈 *Resumen del mes actual (${currentPeriod})*\n`;
+  t += `👤 Fans que han pagado: ${ingresosActual.n || 0}\n`;
+  t += `💰 Total recaudado hasta hoy: ${(ingresosActual.total || 0).toFixed(2)} USDT\n`;
+  t += `💸 Pagos a creadoras hechos: ${pagosActual.n || 0}\n\n`;
+
+  // Lista de pagos individuales a creadoras (del mes anterior)
+  const p = await env.DB.prepare("SELECT c.display_name, p.amount_usdt, p.tx_hash FROM payments p JOIN creators c ON c.id = p.creator_id WHERE p.period = ? AND p.subscriber_id = p.creator_id LIMIT ? OFFSET ?").bind(prevPeriod, limit, offset).all();
   
   if (p.results.length > 0) {
-    t += `*Últimos pagos a creadoras:*\n`;
-    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  [Ver en BscScan](https://bscscan.com/tx/${x.tx_hash})\n`;
+    t += `*Últimos pagos a creadoras (${prevPeriod}):*\n`;
+    for (const x of p.results) t += `• ${x.display_name}: ${x.amount_usdt.toFixed(2)} USDT\n  [Ver en BscScan](https://bscscan.com/tx/${x.tx_hash || 'pendiente'})\n`;
   } else {
-    t += "No hay pagos a creadoras registrados este mes.";
+    t += `No hay pagos a creadoras registrados para ${prevPeriod} (aún no se ha ejecutado el pago automático).`;
   }
   
   const buttons = [];
   if (page > 0) buttons.push([{ text: "⬅️ Página anterior", callback_data: `admin_payments_page_${page - 1}` }]);
-  if ((page + 1) * limit < totalCreadoras.n) buttons.push([{ text: "Página siguiente ➡️", callback_data: `admin_payments_page_${page + 1}` }]);
+  // Aquí podrías añadir paginación si hay muchas creadoras, pero con 5 está bien por ahora
   buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
   
   return await sendMessageWithButtons(env, chatId, t, buttons);
 }
+
   if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env, ctx); // Ir a la página 1
   if (data.startsWith("admin_ban_")) {
   const creatorId = data.split("_")[2];
