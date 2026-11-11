@@ -23,17 +23,56 @@ export default {
     return new Response("Lumen OK", { status: 200 });
   },
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(checkPayments(env));
     ctx.waitUntil(checkExpirations(env));
     ctx.waitUntil(checkWeeklyActivity(env));
     ctx.waitUntil(checkMonthlyPayouts(env));
     ctx.waitUntil(checkReminders(env));
   }
 };
+async function verifyTransaction(env, txHash, expectedTo, minAmountUSDT) {
+  // Llamada única al RPC
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_getTransactionReceipt",
+      params: [txHash]
+    })
+  }).then(r => r.json());
 
+  if (!res.result) return { ok: false, reason: "tx_not_found" };
+
+  const receipt = res.result;
+
+  // 1) La tx se ejecutó sin revertir
+  if (receipt.status !== "0x1") return { ok: false, reason: "tx_failed" };
+
+  // 2) Buscar el evento Transfer del USDT hacia nuestra wallet
+  const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const expectedToPadded = "0x000000000000000000000000" + expectedTo.slice(2).toLowerCase();
+
+  for (const log of receipt.logs) {
+    // Solo logs del contrato USDT
+    if (log.address.toLowerCase() !== USDT_CONTRACT.toLowerCase()) continue;
+    // Solo eventos Transfer
+    if (!log.topics || log.topics[0] !== transferTopic) continue;
+    // El destinatario (topics[2]) debe ser nuestra wallet
+    if (!log.topics[2] || log.topics[2].toLowerCase() !== expectedToPadded) continue;
+
+    // El monto está en log.data
+    const amount = BigInt(log.data);
+    if (amount >= minAmountUSDT) {
+      return { ok: true, amount };
+    }
+  }
+
+  return { ok: false, reason: "no_valid_transfer" };
+}
 async function checkPayments(env) {
   // Buscamos el último bloque escaneado (o empezamos desde el actual si es la primera vez)
-  let lastBlock = await env.KV.get("last_scanned_block");
+  const configRes = await env.DB.prepare("SELECT value FROM config WHERE key = 'last_scanned_block'").first(); let lastBlock = configRes ? configRes.value : null;
   const currentBlockRes = await fetch(RPC_URL, { 
     method: "POST", headers: { "content-type": "application/json" }, 
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }) 
@@ -88,7 +127,7 @@ async function checkPayments(env) {
   }
 
   // Guardamos el último bloque escaneado para la próxima vez
-  await env.KV.put("last_scanned_block", currentBlock.toString());
+  await env.DB.prepare("INSERT INTO config (key, value) VALUES ('last_scanned_block', ?) ON CONFLICT(key) DO UPDATE SET value = ?").bind(currentBlock.toString(), currentBlock.toString()).run();
 }
   
   async function checkExpirations(env) {
@@ -204,23 +243,30 @@ async function handleUpdate(update, env, ctx) {
   
   const msg = update.message;
   if (!msg) return;
+  // Comando secreto para probar pagos (solo admin)
+  if (text === "/test_pago" && telegramId === ADMIN_ID) {
+  await cleanChat(env, chatId, msg.message_id);
+  return await testPayouts(env, chatId);
+}
 
   const chatId = msg.chat.id, telegramId = msg.from.id, text = msg.text ? msg.text.trim() : "";
-  const state = await env.KV.get(`state:${telegramId}`);
+  const stateRes = await env.DB.prepare("SELECT state FROM user_states WHERE telegram_id = ?").bind(telegramId).first(); const state = stateRes ? stateRes.state : null;
 
   // 1. COMANDO /START (SIEMPRE PRIMERO PARA RESETEAR)
   const startMatch = text.match(/^\/start(?:\s+(.+))?$/);
   if (startMatch) { 
-    await cleanChat(env, chatId, msg.message_id); 
-    return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim()); 
-  }
+  const lastMenu = await env.DB.prepare("SELECT message_id FROM user_menus WHERE chat_id = ?").bind(chatId).first();
+  if (lastMenu) await cleanChat(env, chatId, lastMenu.message_id);
+  await cleanChat(env, chatId, msg.message_id); 
+  return await handleStart(env, chatId, telegramId, msg.from.username || null, startMatch[1]?.trim()); 
+}
 
   // 2. ESPERANDO WALLET
   if (state === "awaiting_wallet") {
   await cleanChat(env, chatId, msg.message_id);
   if (text.startsWith("0x") && text.length === 42) {
     await env.DB.prepare("UPDATE creators SET wallet_address = ? WHERE telegram_id = ?").bind(text, telegramId).run();
-    await env.KV.delete(`state:${telegramId}`);
+    await deleteState(env, telegramId, "state");
     await enviarMensajeTemporal(env, chatId, "✅ Wallet guardada correctamente.", 10, ctx);
     return await sendMenuCreator(env, chatId);
   }
@@ -234,64 +280,106 @@ async function handleUpdate(update, env, ctx) {
   // 3. ESPERANDO HASH
   if (state === "awaiting_hash") {
   await cleanChat(env, chatId, msg.message_id);
-  
-  // Filtro estricto (Error temporal)
+
   if (!msg.text || !text.startsWith("0x") || text.length !== 66) {
-  return await enviarMensajeTemporal(env, chatId, "❌ Formato inválido. Por favor, envíame solo el hash de la transacción.", 10, ctx);
-}
+    return await enviarMensajeTemporal(env, chatId, "❌ Formato inválido. Por favor, envíame solo el hash de la transacción.", 10, ctx);
+  }
 
-const validHash = await env.DB.prepare("SELECT * FROM verified_hashes WHERE tx_hash = ? AND status = 'unused'").bind(text).first();
+  // 1) Comprobar si el hash ya fue reclamado por alguien (Bug #1 sigue activo)
+  const existingHash = await env.DB.prepare("SELECT * FROM verified_hashes WHERE tx_hash = ?").bind(text).first();
 
-if (!validHash) {
-  return await enviarMensajeTemporal(env, chatId, "❌ El hash no es válido o ya ha sido utilizado.", 10, ctx);
-}
-  
-  // Hash válido (Activación)
-  const sub = await env.DB.prepare("SELECT * FROM subscriptions WHERE subscriber_id = (SELECT id FROM subscribers WHERE telegram_id = ?) AND status = 'pending'").bind(telegramId).first();
-  if (sub) {
-  // 1. Expirar cualquier suscripción activa anterior de este fan
+  if (existingHash && existingHash.status === "used") {
+    return await enviarMensajeTemporal(env, chatId, "❌ El hash no es válido o ya ha sido utilizado.", 10, ctx);
+  }
+
+  // 2) Verificar la transacción contra la blockchain (una sola llamada)
+  const minAmount = parseUnits("1", 18); // 1 USDT
+  const verification = await verifyTransaction(env, text, MASTER_WALLET, minAmount);
+
+  if (!verification.ok) {
+    return await enviarMensajeTemporal(env, chatId, "❌ El hash no es válido o la transacción no cumple los requisitos (1 USDT a la wallet correcta).", 10, ctx);
+  }
+
+  // 3) Reclamo atómico del hash (Bug #1)
+  const claim = await env.DB.prepare(
+    "UPDATE verified_hashes SET status = 'used', used_by_telegram_id = ?, used_at = datetime('now') WHERE tx_hash = ? AND status = 'unused'"
+  ).bind(telegramId, text).run();
+
+  let claimed = claim.meta && claim.meta.changes > 0;
+
+  // 3b) Si el hash no existía en la tabla, lo insertamos directamente como usado
+  if (!claimed && !existingHash) {
+    const insert = await env.DB.prepare(
+      "INSERT INTO verified_hashes (tx_hash, status, used_by_telegram_id, used_at) VALUES (?, 'used', ?, datetime('now')) ON CONFLICT DO NOTHING"
+    ).bind(text, telegramId).run();
+    claimed = insert.meta && insert.meta.changes > 0;
+  }
+
+  if (!claimed) {
+    return await enviarMensajeTemporal(env, chatId, "❌ El hash no es válido o ya ha sido utilizado.", 10, ctx);
+  }
+
+  // 4) Activar suscripción
+  const sub = await env.DB.prepare(
+    "SELECT * FROM subscriptions WHERE subscriber_id = (SELECT id FROM subscribers WHERE telegram_id = ?) AND status = 'pending'"
+  ).bind(telegramId).first();
+
+  if (!sub) {
+    return await enviarMensajeTemporal(env, chatId, "❌ No tienes una suscripción pendiente. Pulsa /start.", 10, ctx);
+  }
+
   await env.DB.prepare("UPDATE subscriptions SET status = 'expired' WHERE subscriber_id = ? AND status = 'active'").bind(sub.subscriber_id).run();
 
   const now = new Date();
   const expires = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  
-  await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?").bind(now.toISOString(), expires, sub.id).run();
-  await env.DB.prepare("UPDATE verified_hashes SET status = 'used' WHERE id = ?").bind(validHash.id).run();
-    // GUARDAMOS EL PAGO PARA QUE LA CREADORA COBRE
-    const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-    await env.DB.prepare("INSERT INTO payments (subscriber_id, creator_id, amount_usdt, period, tx_hash) VALUES (?, ?, 1.0, ?, ?)").bind(sub.subscriber_id, sub.creator_id, period, validHash.tx_hash).run();
-    const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
-    await env.KV.delete(`state:${telegramId}`);
-    
-    return await sendMessageWithButtons(env, chatId, `✅ *¡Pago verificado!*\n\nAquí tienes tu acceso al canal VIP:`, [[{ text: "🚪 Entrar al Canal VIP", url: link }]]);
-  }
-  return;
+
+  await env.DB.prepare("UPDATE subscriptions SET status = 'active', started_at = ?, expires_at = ? WHERE id = ?")
+    .bind(now.toISOString(), expires, sub.id).run();
+
+  // 5) Registrar pago para la creadora
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  await env.DB.prepare("INSERT INTO payments (subscriber_id, creator_id, amount_usdt, period, tx_hash) VALUES (?, ?, 1.0, ?, ?)")
+    .bind(sub.subscriber_id, sub.creator_id, period, text).run();
+
+  // 6) Entregar link + botón de volver al menú
+  const link = await createInviteLink(env, await env.KV.get("config:channel_id"), `fan_${telegramId}_${Date.now()}`);
+  await deleteState(env, telegramId, "state");
+
+  return await sendMessageWithButtons(env, chatId,
+    `✅ *¡Pago verificado!*\n\nAquí tienes tu acceso al canal VIP:`,
+    [
+      [{ text: "🚪 Entrar al Canal VIP", url: link }],
+      [{ text: "🔙 Volver al Menú Principal", callback_data: "fan_menu" }]
+    ]
+  );
 }
 
   // 4. ESPERANDO ID PARA BANEAR
   if (state === "awaiting_ban_id") {
-    await cleanChat(env, chatId, msg.message_id);
-    if (text === "/cancelar") {
-      await env.KV.delete(`state:${telegramId}`);
-      return await sendMessage(env, chatId, "❌ Baneo cancelado.");
-    }
-    const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(text).first();
-    if (creator) {
-      const channelId = await env.KV.get("config:channel_id");
-      if (channelId) {
-        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: text }) });
-      }
-      if (env.CREATORS_GROUP_ID) {
-        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: text }) });
-      }
-      await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(text).run();
-      await env.KV.delete(`state:${telegramId}`);
-      return await sendMessage(env, chatId, `✅ Creadora ${creator.display_name} baneada y desactivada correctamente.`);
-    } else {
-      return await sendMessage(env, chatId, "❌ No se encontró ninguna creadora con ese ID. Inténtalo de nuevo o escribe /cancelar.");
-    }
+  await cleanChat(env, chatId, msg.message_id);
+  if (text === "/cancelar") {
+    await env.KV.delete(`state:${telegramId}`);
+    return await sendMessage(env, chatId, "❌ Baneo cancelado.");
   }
-
+  
+  const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(text).first();
+  if (creator) {
+    const channelId = await env.KV.get("config:channel_id");
+    if (channelId) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: channelId, user_id: text }) });
+    }
+    if (env.CREATORS_GROUP_ID) {
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/banChatMember`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: env.CREATORS_GROUP_ID, user_id: text }) });
+    }
+    await env.DB.prepare("UPDATE creators SET active = 0 WHERE telegram_id = ?").bind(text).run();
+    await deleteState(env, telegramId, "state");
+    return await sendMessage(env, chatId, `✅ Creadora ${creator.display_name} baneada y desactivada correctamente.`);
+  } else {
+    return await sendMessageWithButtons(env, chatId, "❌ No se encontró ninguna creadora con ese ID. Inténtalo de nuevo o cancela.", [
+    [{ text: "❌ Cancelar Baneo", callback_data: "admin_ban_cancel" }]
+  ]);
+ }
+}
   // 5. FOTOS, VIDEOS Y NOTAS DE VIDEO
   if (msg.video_note || msg.photo || msg.video) return await handleMedia(env, msg, ctx);
   if (!msg.text) return;
@@ -322,9 +410,9 @@ if (activeSub) {
 }
 async function handleMedia(env, msg, ctx) {
   const chatId = msg.chat.id, telegramId = msg.from.id;
-  const uploadState = await env.KV.get(`upload_state:${telegramId}`);
+  const uploadState = await getState(env, telegramId, "upload_state");
   if (uploadState === "waiting") {
-  await env.KV.delete(`upload_state:${telegramId}`);
+  await deleteState(env, telegramId, "upload_state");
   // Borramos el mensaje de las reglas (y cualquier otro que haya mandado)
   await cleanChat(env, chatId, msg.message_id - 1); 
   await cleanChat(env, chatId, msg.message_id);
@@ -352,12 +440,18 @@ await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, {
     await sendMenuCreator(env, chatId);
     return;
   }
+  // Si está en modo verificación y NO es una nota de video, lo rechazamos
+const pendingVerify = await getState(env, telegramId, "verify_state");
+if (pendingVerify === "waiting_video" && !msg.video_note) {
+  await cleanChat(env, chatId, msg.message_id);
+  return await sendMessage(env, chatId, "❌ En la verificación solo acepto **Notas de Video** (el círculo). Envía una Nota de Video o toca /start para salir.");
+}
   if (msg.video_note) {
-  const pending = await env.KV.get(`verify_state:${telegramId}`);
+  const pending = await getState(env, telegramId, "verify_state");
   if (pending === "waiting_video") {
-  await env.KV.delete(`verify_state:${telegramId}`);
-  const savedCode = await env.KV.get(`verify_code:${telegramId}`);
-  await env.KV.delete(`verify_code:${telegramId}`);
+  await deleteState(env, telegramId, "verify_state");
+  const savedCode = await getState(env, telegramId, "verify_code");
+  await deleteState(env, telegramId, "verify_code");
   
   // Borramos el video del chat de la fan
   await cleanChat(env, chatId, msg.message_id);
@@ -440,14 +534,14 @@ async function handleCallback(cb, env, ctx) {
   
   await env.DB.prepare("INSERT INTO subscriptions (subscriber_id, creator_id, started_at, expires_at, status) VALUES (?, ?, datetime('now'), datetime('now'), 'pending')").bind(sub.id, creatorId).run();
   
-  await env.KV.put(`state:${telegramId}`, "awaiting_hash", { expirationTtl: 10800 });
+  await setState(env, telegramId, "state", "awaiting_hash");
   
   const msg = `💎 *Suscripción VIP*\n\n1. Envía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\n👆 *Toca la dirección para copiarla*\n\n2. Cuando lo hayas enviado, **pégame aquí el hash de la transacción** (empieza por 0x...).\n\n_⏱ El sistema verificará el hash automáticamente._`;
   
   return await sendMessageWithButtons(env, chatId, msg, [[{ text: "🔙 Volver al menú", callback_data: "fan_menu" }]]);
 }
 if (data === "renew_sub") {
-  await env.KV.put(`state:${telegramId}`, "awaiting_hash", { expirationTtl: 10800 });
+  await setState(env, telegramId, "state", "awaiting_hash");
   
   const msg = `💎 *Renovación de Suscripción*\n\n1. Envía exactamente **1 USDT** (red BEP20) a esta dirección:\n\n\`${MASTER_WALLET}\`\n\n👆 *Toca la dirección para copiarla*\n\n2. Cuando lo hayas enviado, **pégame aquí el hash de la transacción** (empieza por 0x...).\n\n_⏱ El sistema verificará el hash automáticamente._`;
   
@@ -471,7 +565,9 @@ if (data === "renew_sub") {
   if (data === "faq_net") return await sendMessageWithButtons(env, chatId, "Debes enviar USDT por la red *BNB Smart Chain (BEP20)*.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "faq_human") return await sendMessageWithButtons(env, chatId, "Escribe tu problema y un administrador te responderá.", [[{ text: "🔙 Volver Atrás", callback_data: "support_fan" }]]);
   if (data === "fan_menu") {
-  await env.KV.delete(`state:${telegramId}`);
+  await deleteState(env, telegramId, "verify_state");
+  await deleteState(env, telegramId, "verify_code");
+  await deleteState(env, telegramId, "state");
   // Comprobamos si sigue suscrito antes de mostrar el menú
   const activeSub = await env.DB.prepare("SELECT s.* FROM subscriptions s JOIN subscribers u ON u.id = s.subscriber_id WHERE u.telegram_id = ? AND s.status = 'active' ORDER BY s.expires_at DESC LIMIT 1").bind(telegramId).first();
   if (activeSub) {
@@ -505,20 +601,28 @@ if (data === "renew_sub") {
   const state = await env.KV.get("config:creator_registration") || "open";
   if (state === "paused") return await sendMessage(env, chatId, "⏳ El registro está cerrado temporalmente.");
   
-  // Comprobamos los intentos
   const sub = await env.DB.prepare("SELECT verify_attempts FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
   if (sub && sub.verify_attempts >= 3) {
     return await sendMessage(env, chatId, "🚫 Has agotado tus 3 intentos de verificación. Ya no puedes registrarte como creadora.");
   }
 
-  const randomCode = Math.floor(1000 + Math.random() * 9000).toString();
-  await env.KV.put(`verify_code:${telegramId}`, randomCode, { expirationTtl: 3600 });
-  await env.KV.put(`verify_state:${telegramId}`, "waiting_video", { expirationTtl: 3600 });
-  
-  return await sendMessageWithButtons(env, chatId, `🎬 *Verificación*\n\nEnvía una Nota de Video diciendo: *"Soy [tu nombre], mi código es ${randomCode}, tengo más de 18 años"* y pásate los dedos por la cara.`, [[{ text: "🔙 Cancelar", callback_data: "fan_menu" }]]);
+  const contrato = `📜 *Contrato de Creadora - Lumen Club*\n\nAntes de continuar, lee y acepta las siguientes condiciones:\n\n*1. Requisito de Edad:*\nDeclaro ser *mayor de 18 años*.\n\n*2. Contenido Permitido:*\n✅ Contenido legal para adultos.\n✅ Enlaces a redes sociales (Instagram, TikTok, OnlyFans).\n✅ Hashtags y peticiones de Estrellas (⭐).\n\n*3. Contenido Prohibido (Expulsión y pérdida total de monetización):*\n❌ CSAM (abuso infantil).\n❌ Bestialidad.\n❌ No consensuado.\n❌ Enlaces a otros canales o bots de Telegram.\n\n*4. Monetización:*\n💰 *Ganancias por Suscriptores:*\n- 1 a 99 fans: *50%* de cada 1 USDT.\n- 100 a 499 fans: *60%*.\n- 500 a 999 fans: *70%*.\n- 1,000 a 4,999 fans: *80%*.\n- Más de 5,000 fans: *90%*.\n\n⭐ *Ganancias por Calidad (Bono Extra):*\nEl Índice de Calidad se calcula dividiendo *todas las Estrellas (⭐) que recibas en el mes* entre tus fans activos.\n- Índice 0 a 0.99: Sin bono.\n- Índice 1.0 a 1.99: 🥉 *Bronce (5% extra)*.\n- Índice 2.0 a 2.99: 🥈 *Plata (10% extra)*.\n- Índice 3.0 a 3.99: 🥇 *Oro (20% extra)*.\n- Índice 4.0 a 4.99: 💎 *Diamante (30% extra)*.\n- Índice 5.0 o más: 👑 *Leyenda (40% extra)*.\n_(Este bono es un incentivo extra que paga la plataforma. No te quita tu comisión base)._\n\n💳 *Pago:* El día 1 de cada mes a tu wallet USDT (BEP20).\n\n*5. Pérdida de Monetización:*\n⚠️ Si no subes un mínimo de *3 publicaciones cada 7 días*, perderás un *10% de tu comisión por cada semana fallida* y *perderás el bono de calidad* de ese mes.\n\nAl tocar "Acepto", confirmas que has leído y aceptas todas estas condiciones.`;
+
+  return await sendMessageWithButtons(env, chatId, contrato, [
+    [{ text: "✅ Acepto el Contrato y soy mayor de 18", callback_data: "accept_contract" }],
+    [{ text: "❌ Rechazo y vuelvo al menú", callback_data: "fan_menu" }]
+  ]);
 }
+if (data === "accept_contract") {
+  const randomCode = Math.floor(1000 + Math.random() * 9000).toString();
+  await setState(env, telegramId, "verify_code", randomCode);
+  await setState(env, telegramId, "verify_state", "waiting_video");
+  
+  return await sendMessageWithButtons(env, chatId, `🎬 *Verificación de Identidad*\n\nPara continuar, envía una **Nota de Video** (el círculo) diciendo en voz alta:\n\n*"Soy [Tu Nombre], mi código es ${randomCode}, tengo más de 18 años"*.\n\n⚠️ *Mientras hablas, pásate los dedos por la cara para demostrar que eres real.*`, [[{ text: "🔙 Cancelar", callback_data: "fan_menu" }]]);
+}
+
   if (data === "creator_upload") { 
-  await env.KV.put(`upload_state:${telegramId}`, "waiting", { expirationTtl: 3600 }); 
+  await setState(env, telegramId, "upload_state", "waiting"); 
   return await sendMessageWithButtons(env, chatId, `📤 *Subir Contenido*\n\nEnvía tu foto, video o nota de video. Se publicará al instante en el canal VIP.\n\n✅ *Qué puedes incluir:*\n• *Enlaces a tus redes:* Instagram, TikTok, OnlyFans, etc.\n• *Hashtags (#):* Para que los fans encuentren tu contenido.\n• *Apoyo con Estrellas (⭐):* Puedes pedir a tus fans que te envíen Estrellas como muestra de apoyo. Estas se acumulan a tu favor para el bono de calidad.\n\n❌ *Prohibido (Expulsión y pérdida de monetización):*\n• *CSAM:* Cualquier contenido de abuso o explotación infantil.\n• *Bestialidad:* Contenido sexual con animales.\n• *No consensuado:* Contenido sexual de personas sin su permiso.`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]); 
 }
   if (data === "creator_panel") {
@@ -533,26 +637,46 @@ if (data === "renew_sub") {
   return await sendMessageWithButtons(env, chatId, `📊 *Mi Panel*\n\nFans: ${f.t}\nEstado: ${c.verified ? "✅ Verificada" : "⏳ Pendiente"}${penaltyText}`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
 }
   if (data === "creator_earnings") {
-    const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
-    const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
-    const fans = f.t;
-    let pct = fans >= 5000 ? 0.90 : fans >= 1000 ? 0.80 : fans >= 500 ? 0.70 : fans >= 100 ? 0.60 : 0.50;
-    const commission = fans * 1.0 * pct;
-    const ownerMargin = fans * 1.0 * (1 - pct);
-    const now = new Date(); const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(c.id, period).first();
-    const totalStars = stars ? stars.total_stars : 0;
-    const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
-    let bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
-    const bonus = ownerMargin * bonusPct;
-    return await sendMessageWithButtons(env, chatId, `💰 *Mis Ganancias*\n\nFans: ${fans}\nComisión: ${(pct*100)}%\nCalidad: ${qualityIndex.toFixed(2)} ⭐\n\nDesglose:\n• Comisión: ${commission.toFixed(2)} USDT\n• Bono: ${bonus.toFixed(2)} USDT\n\n*Total estimado:* ${(commission+bonus).toFixed(2)} USDT`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
+  const c = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(telegramId).first();
+  const f = await env.DB.prepare("SELECT COUNT(*) as t FROM subscribers WHERE referred_by = ?").bind(c.start_code).first();
+  const fans = f.t;
+  let pct = fans >= 5000 ? 0.90 : fans >= 1000 ? 0.80 : fans >= 500 ? 0.70 : fans >= 100 ? 0.60 : 0.50;
+  
+  const penalty = c.penalty_weeks || 0;
+  const penaltyAmount = penalty * 0.10;
+  const pctFinal = Math.max(0, pct - penaltyAmount);
+  
+  const commission = fans * 1.0 * pctFinal;
+  const ownerMargin = fans * 1.0 * (1 - pctFinal);
+  
+  const now = new Date(); 
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(c.id, period).first();
+  const totalStars = stars ? stars.total_stars : 0;
+  const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
+  
+  let bonusPct = 0;
+  let bonus = 0;
+  
+  // SI HAY PENALIZACIÓN, EL BONO ES CERO
+  if (penalty === 0) {
+    bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
+    bonus = ownerMargin * bonusPct;
   }
+  
+  let penaltyText = "";
+  if (penalty > 0) {
+    penaltyText = `\n\n⚠️ *Penalización activa:* ${penalty} semana(s) sin cumplir. Pierdes el bono de calidad y un *${(penaltyAmount*100).toFixed(0)}%* de comisión.`;
+  }
+
+  return await sendMessageWithButtons(env, chatId, `💰 *Mis Ganancias*\n\nFans: ${fans}\nComisión base: ${(pct*100)}%\nComisión aplicada: ${(pctFinal*100)}%\nCalidad: ${qualityIndex.toFixed(2)} ⭐\n\nDesglose:\n• Comisión: ${commission.toFixed(2)} USDT\n• Bono: *${bonus.toFixed(2)} USDT*\n\n*Total estimado:* ${(commission+bonus).toFixed(2)} USDT${penaltyText}`, [[{ text: "🔙 Volver al Menú Principal", callback_data: "creator_menu" }]]);
+}
   if (data === "creator_wallet") { 
   const c = await env.DB.prepare("SELECT wallet_address FROM creators WHERE telegram_id = ?").bind(telegramId).first();
   const hasWallet = c && c.wallet_address;
   const txt = hasWallet ? `🏦 *Mi Wallet*\n\nTu dirección actual es:\n\`${c.wallet_address}\`\n\nSi quieres cambiarla, envíame la nueva dirección por este chat.` : `🏦 *Configura tu Wallet para cobrar*\n\nPara recibir tus pagos, necesitas una wallet.\n1. Descarga una app de abajo.\n2. Busca USDT en red BEP20.\n3. Copia tu dirección (0x...).\n4. Envíamela por este chat.`;
   
-  await env.KV.put(`state:${telegramId}`, "awaiting_wallet", { expirationTtl: 3600 }); 
+  await setState(env, telegramId, "state", "awaiting_wallet"); 
   
   return await sendMessageWithButtons(env, chatId, txt, [
     [{ text: "📲 SafePal", url: "https://www.safepal.com/download" }, { text: "📲 Trust", url: "https://trustwallet.com/download" }],
@@ -629,18 +753,24 @@ if (data === "renew_sub") {
   }
 }
   if (data === "creator_menu") {
-  await env.KV.delete(`state:${telegramId}`);
-  await env.KV.delete(`upload_state:${telegramId}`);
-  await env.KV.delete(`verify_state:${telegramId}`);
-  await env.KV.delete(`verify_code:${telegramId}`);
+  await deleteState(env, telegramId, "state");
+  await deleteState(env, telegramId, "upload_state");
+  await deleteState(env, telegramId, "verify_state");
+  await deleteState(env, telegramId, "verify_code");
   return await sendMenuCreator(env, chatId);
 }
 
   // === ADMIN ===
   if (data === "admin_menu") return await sendMenuAdmin(env, chatId);
   if (data === "admin_ban_prompt") {
-  await env.KV.put(`state:${telegramId}`, "awaiting_ban_id", { expirationTtl: 3600 });
-  return await sendMessage(env, chatId, "🚫 Para banear a una creadora, envíame su ID de Telegram (el número que aparece en la lista).\n\n*Escribe /cancelar para salir.*");
+  await setState(env, telegramId, "state", "awaiting_ban_id");
+  return await sendMessageWithButtons(env, chatId, "🚫 Envíame el ID de Telegram de la creadora a banear.", [
+    [{ text: "❌ Cancelar Baneo", callback_data: "admin_ban_cancel" }]
+  ]);
+}
+if (data === "admin_ban_cancel") {
+  await deleteState(env, telegramId, "state");
+  return await sendMessage(env, chatId, "❌ Baneo cancelado.");
 }
   if (data.startsWith("admin_ignore_")) {
   const msgId = data.split("_")[2];
@@ -717,7 +847,7 @@ buttons.push([{ text: "🚫 Banear Creadora por ID", callback_data: "admin_ban_p
 buttons.push([{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]);
 return await sendMessageWithButtons(env, chatId, t, buttons);
 }
-  if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env); // Ir a la página 1
+  if (data === "admin_creators") return await handleCallback({ ...cb, data: "admin_creators_page_0" }, env, ctx); // Ir a la página 1
   
   // Paginación Pagos
 if (data.startsWith("admin_payments_page_")) {
@@ -756,7 +886,7 @@ if (data.startsWith("admin_payments_page_")) {
   
   return await sendMessageWithButtons(env, chatId, t, buttons);
 }
-  if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env); // Ir a la página 1
+  if (data === "admin_payments") return await handleCallback({ ...cb, data: "admin_payments_page_0" }, env, ctx); // Ir a la página 1
   if (data.startsWith("admin_ban_")) {
   const creatorId = data.split("_")[2];
   const creator = await env.DB.prepare("SELECT * FROM creators WHERE telegram_id = ?").bind(creatorId).first();
@@ -809,23 +939,27 @@ async function answerCallback(env, id) { return fetch(`https://api.telegram.org/
 function json(obj, status = 200) { return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } }); }
 
 async function sendMenuFan(env, chatId) { 
-  await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
+  const sent = await sendMessageWithButtons(env, chatId, "👋 *Bienvenido a Lumen VIP*\n\nPaga **1 USDT al mes** y accede al contenido exclusivo de todas nuestras creadoras.\n\nElige una opción:", [
     [{ text: "💎 Suscribirme — 1 USDT", callback_data: "subscribe" }],
     [{ text: "📊 Mi Estado de Suscripción", callback_data: "status" }, { text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }],
     [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }],
     [{ text: "🆘 Soporte", callback_data: "support_fan" }]
   ]); 
+  await env.DB.prepare("INSERT INTO user_menus (chat_id, message_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET message_id = ?").bind(chatId, sent.result.message_id, sent.result.message_id).run();
+  return sent;
 }
 async function sendMenuFanActive(env, chatId) { 
-  await sendMessageWithButtons(env, chatId, "👋 *¡Hola de nuevo, Fan VIP!*\n\nTu suscripción está activa. ¿Qué quieres hacer hoy?", [
+  const sent = await sendMessageWithButtons(env, chatId, "👋 *¡Hola de nuevo, Fan VIP!*\n\nTu suscripción está activa. ¿Qué quieres hacer hoy?", [
     [{ text: "📊 Ver mi Estado de Suscripción", callback_data: "status" }],
     [{ text: "💎 Renovar mi Suscripción por 1 USDT", callback_data: "renew_sub" }],
     [{ text: "📚 ¿Cómo funciona Lumen VIP?", callback_data: "how_it_works" }, { text: "🆘 Soporte y Ayuda", callback_data: "support_fan" }],
     [{ text: "🎨 Quiero ser Creadora", callback_data: "become_creator" }]
   ]); 
+  await env.DB.prepare("INSERT INTO user_menus (chat_id, message_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET message_id = ?").bind(chatId, sent.result.message_id, sent.result.message_id).run();
+  return sent;
 }
 async function sendMenuCreator(env, chatId) { 
-  await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
+  const sent = await sendMessageWithButtons(env, chatId, "👩‍🎨 *Menú de Creadora*\n\nElige una opción:", [
     [{ text: "📤 Subir Contenido al Canal VIP", callback_data: "creator_upload" }],
     [{ text: "📊 Mi Panel de Rendimiento", callback_data: "creator_panel" }, { text: "💰 Mis Ganancias Acumuladas", callback_data: "creator_earnings" }],
     [{ text: "🏦 Mi Wallet de Pagos", callback_data: "creator_wallet" }, { text: "🔗 Enlace de Acceso al Canal", callback_data: "creator_channel_link" }],
@@ -833,15 +967,19 @@ async function sendMenuCreator(env, chatId) {
     [{ text: "🧮 Cómo se Calculan las Ganancias", callback_data: "creator_calc" }, { text: "📚 Guía y Tutorial de la Creadora", callback_data: "creator_tutorial" }],
     [{ text: "🆘 Soporte Técnico", callback_data: "creator_support" }]
   ]); 
+  await env.DB.prepare("INSERT INTO user_menus (chat_id, message_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET message_id = ?").bind(chatId, sent.result.message_id, sent.result.message_id).run();
+  return sent;
 }
 async function sendMenuAdmin(env, chatId) { 
   const state = await env.KV.get("config:creator_registration") || "open"; 
   const pauseBtn = state === "open" ? "⏸️ Pausar Nuevas Creadoras" : "▶️ Reanudar Nuevas Creadoras"; 
-  await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
+  const sent = await sendMessageWithButtons(env, chatId, "⚙️ *Panel de Administración*\n\nElige una opción:", [
     [{ text: "📈 Estadísticas Generales", callback_data: "admin_stats" }],
     [{ text: "👥 Gestionar Creadoras", callback_data: "admin_creators" }, { text: "💵 Ingresos y Pagos", callback_data: "admin_payments" }],
     [{ text: pauseBtn, callback_data: "admin_pause" }]
   ]); 
+  await env.DB.prepare("INSERT INTO user_menus (chat_id, message_id) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET message_id = ?").bind(chatId, sent.result.message_id, sent.result.message_id).run();
+  return sent;
 }
 async function checkReminders(env) {
   const now = new Date();
@@ -893,4 +1031,81 @@ async function enviarMensajeTemporal(env, chatId, texto, segundos, ctx) {
       });
     })());
   }
+}
+async function setState(env, telegramId, key, value) {
+  const dbKey = `${key}:${telegramId}`;
+  await env.DB.prepare("INSERT INTO user_states (telegram_id, state) VALUES (?, ?) ON CONFLICT(telegram_id) DO UPDATE SET state = ?").bind(telegramId, `${key}|${value}`, `${key}|${value}`).run();
+}
+
+async function getState(env, telegramId, key) {
+  const res = await env.DB.prepare("SELECT state FROM user_states WHERE telegram_id = ?").bind(telegramId).first();
+  if (res && res.state && res.state.startsWith(`${key}|`)) {
+    return res.state.split("|")[1];
+  }
+  return null;
+}
+
+async function deleteState(env, telegramId, key) {
+  const current = await getState(env, telegramId, key);
+  if (current !== null) {
+    await env.DB.prepare("DELETE FROM user_states WHERE telegram_id = ?").bind(telegramId).run();
+  }
+}
+async function testPayouts(env, chatId) {
+  const now = new Date();
+  const prevMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+  const period = `${prevMonth.getUTCFullYear()}-${String(prevMonth.getUTCMonth() + 1).padStart(2, '0')}`;
+  
+  await sendMessage(env, chatId, `🧪 *Iniciando simulación de pagos*\nPeríodo: *${period}*\nAnalizando datos...`);
+
+  const earnings = await env.DB.prepare("SELECT creator_id, SUM(amount_usdt) as suma_fans, COUNT(*) as total_subs FROM payments WHERE period = ? AND subscriber_id != creator_id GROUP BY creator_id").bind(period).all();
+
+  if (!earnings.results || earnings.results.length === 0) {
+    return await sendMessage(env, chatId, `📭 No hay pagos de fans registrados en el período ${period}.`);
+  }
+
+  let report = `🧪 *MODO PRUEBA (Simulación)*\n\n`;
+  let totalGeneral = 0;
+
+  for (const row of earnings.results) {
+    const creator = await env.DB.prepare("SELECT * FROM creators WHERE id = ?").bind(row.creator_id).first();
+    if (!creator || !creator.wallet_address) continue;
+
+    const fans = row.suma_fans || row.total_subs;
+    let pctBase = fans >= 5000 ? 0.90 : fans >= 1000 ? 0.80 : fans >= 500 ? 0.70 : fans >= 100 ? 0.60 : 0.50;
+    
+    const penalty = creator.penalty_weeks || 0;
+    const pctFinal = Math.max(0, pctBase - (penalty * 0.10));
+    
+    const commission = fans * 1.0 * pctFinal;
+    
+    const stars = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(creator.id, period).first();
+    const totalStars = stars ? stars.total_stars : 0;
+    const qualityIndex = fans > 0 ? (totalStars / fans) : 0;
+    
+    let bonusPct = 0;
+    if (penalty === 0) {
+      bonusPct = qualityIndex >= 5 ? 0.40 : qualityIndex >= 4 ? 0.30 : qualityIndex >= 3 ? 0.20 : qualityIndex >= 2 ? 0.10 : qualityIndex >= 1 ? 0.05 : 0;
+    }
+    
+    const ownerMargin = fans * 1.0 * (1 - pctFinal); // Usamos pctFinal para el margen
+    const bonusAmount = ownerMargin * bonusPct;
+    const totalToPay = commission + bonusAmount;
+    
+    if (totalToPay <= 0) continue;
+    totalGeneral += totalToPay;
+
+    report += `👩‍🎨 *${creator.display_name}*\n`;
+    report += `• Fans: ${fans}\n`;
+    report += `• Comisión: ${(pctBase*100)}% ${penalty > 0 ? `(-${penalty*10}% castigo) = ${(pctFinal*100)}%` : ''}\n`;
+    report += `• Calidad: ⭐ ${totalStars} (Índice: ${qualityIndex.toFixed(2)} -> Bono: ${(bonusPct*100)}%)\n`;
+    report += `• 💰 Comisión: ${commission.toFixed(2)} USDT\n`;
+    report += `• 🎁 Bono: ${bonusAmount.toFixed(2)} USDT\n`;
+    report += `• *TOTAL: ${totalToPay.toFixed(2)} USDT*\n\n`;
+  }
+
+  report += `💵 *TOTAL SIMULADO GLOBAL:* ${totalGeneral.toFixed(2)} USDT\n`;
+  report += `_No se ha enviado ninguna transacción real._`;
+
+  return await sendMessage(env, chatId, report);
 }
