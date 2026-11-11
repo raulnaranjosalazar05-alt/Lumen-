@@ -822,9 +822,31 @@ if (data === "accept_contract") {
   const ingresosPrev = await env.DB.prepare("SELECT SUM(amount_usdt) as total FROM payments WHERE period = ? AND subscriber_id != creator_id").bind(prevPeriod).first();
   const totalRecaudadoPrev = ingresosPrev.total || 0;
 
-  // 2. Lo que se va a pagar a las creadoras (los pagos que tienen subscriber_id = creator_id)
-  const pagosPrev = await env.DB.prepare("SELECT SUM(amount_usdt) as total FROM payments WHERE period = ? AND subscriber_id = creator_id").bind(prevPeriod).first();
-  const totalPagadoPrev = pagosPrev.total || 0;
+  // 2. Simulamos lo que se va a pagar a las creadoras para calcular la ganancia real
+const earningsSim = await env.DB.prepare("SELECT creator_id, SUM(amount_usdt) as suma_fans FROM payments WHERE period = ? AND subscriber_id != creator_id GROUP BY creator_id").bind(prevPeriod).all();
+let totalPagadoPrev = 0;
+
+if (earningsSim.results) {
+  for (const row of earningsSim.results) {
+    const c = await env.DB.prepare("SELECT penalty_weeks FROM creators WHERE id = ?").bind(row.creator_id).first();
+    const f = row.suma_fans;
+    const p = c ? (c.penalty_weeks || 0) : 0;
+    
+    let pct = f >= 5000 ? 0.90 : f >= 1000 ? 0.80 : f >= 500 ? 0.70 : f >= 100 ? 0.60 : 0.50;
+    pct = Math.max(0, pct - (p * 0.10));
+    
+    const com = f * pct;
+    const starsRes = await env.DB.prepare("SELECT total_stars FROM stars_monthly WHERE creator_id = ? AND period = ?").bind(row.creator_id, prevPeriod).first();
+    const stars = starsRes ? starsRes.total_stars : 0;
+    const qIndex = f > 0 ? (stars / f) : 0;
+    
+    let bPct = 0;
+    if (p === 0) bPct = qIndex >= 5 ? 0.40 : qIndex >= 4 ? 0.30 : qIndex >= 3 ? 0.20 : qIndex >= 2 ? 0.10 : qIndex >= 1 ? 0.05 : 0;
+    
+    const margin = f * (1 - pct);
+    totalPagadoPrev += com + (margin * bPct);
+  }
+}
 
   // 3. Tu ganancia neta del mes anterior
   const gananciaNeta = totalRecaudadoPrev - totalPagadoPrev;
