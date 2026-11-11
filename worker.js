@@ -1096,7 +1096,6 @@ async function testPayouts(env, chatId) {
     
     if (totalToPay <= 0) continue;
     totalGeneral += totalToPay;
-
     report += `👩‍🎨 *${creator.display_name}*\n`;
     report += `• Fans: ${fans}\n`;
     report += `• Comisión: ${(pctBase*100)}% ${penalty > 0 ? `(-${penalty*10}% castigo) = ${(pctFinal*100)}%` : ''}\n`;
