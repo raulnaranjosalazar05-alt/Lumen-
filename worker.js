@@ -459,6 +459,7 @@ if (pendingVerify === "waiting_video" && !msg.video_note) {
   }
 }
 }
+}
 async function handleCallback(cb, env, ctx) {
   const chatId = cb.message.chat.id, telegramId = cb.from.id, data = cb.data;
   await answerCallback(env, cb.id);
