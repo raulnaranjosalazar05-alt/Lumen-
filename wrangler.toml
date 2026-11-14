@@ -1,13 +1,54 @@
-name = "lumen-club"
+name = "lumen"
 main = "worker.js"
 compatibility_date = "2024-05-01"
 compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
+binding = "DB_CONFIG"
+database_name = "lumen_config"
+database_id = "0cdddb4c-6332-4c27-8bf3-b3d89e77ee70"
+
+[[d1_databases]]
+binding = "DB_USUARIOS"
+database_name = "lumen_usuarios"
+database_id = "46a2a815-a96b-48e7-8514-6b32e93c9bdc"
+
+[[d1_databases]]
+binding = "DB_PAGOS"
+database_name = "lumen_pagos"
+database_id = "d1dd2fb6-e035-443e-b0db-e4dc4d8ba1c7"
+
+[[d1_databases]]
+binding = "DB_CONTENIDO"
+database_name = "lumen_contenido"
+database_id = "1232a987-6f73-4b91-b85b-89ceadb8b4f4"
+
+[[d1_databases]]
+binding = "DB_VERIFICACION"
+database_name = "lumen_verificacion"
+database_id = "a91d7051-7634-4535-bd8a-8c67d299d41b"
+
+[[d1_databases]]
+binding = "DB_TEMPORAL"
+database_name = "lumen_temporal"
+database_id = "9ff4f951-6ae9-4ce7-b566-3ff2f18e825b"
+
+[[d1_databases]]
+binding = "DB_NOTIFICACIONES"
+database_name = "lumen_notificaciones"
+database_id = "1e870423-0e43-4926-845a-d98441083f2d"
+
+[[d1_databases]]
+binding = "DB_LOGS"
+database_name = "lumen_logs"
+database_id = "ec18d6bb-3b9e-4257-9685-7a64ec7bf602"
+
+[[d1_databases]]
+binding = "DB_BACKUP"
+database_name = "lumen_backup"
+database_id = "dc6cfecf-b396-4b58-bc6b-d895d02b233c"
+
+[[d1_databases]]
 binding = "DB"
 database_name = "lumen-db"
 database_id = "dc4b2bef-e292-4b0e-8111-c5feb2a97edb"
-
-[[kv_namespaces]]
-binding = "KV"
-id = "90051448d122432abb561afe3ebef3b2"
