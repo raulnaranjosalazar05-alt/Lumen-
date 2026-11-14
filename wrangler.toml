@@ -1091,12 +1091,14 @@ if (earningsSim.results) {
   return;
 }
   if (data === "admin_pause") { 
-  // Verificamos si el registro está cerrado por límite de 100
-  const limiteAlcanzado = await env.DB_CONFIG.prepare("SELECT valor FROM sistema WHERE clave = 'registro_estado'").first();
-  if (limiteAlcanzado && limiteAlcanzado.valor === "cerrado") {
+  // Verificamos si el registro está cerrado
+  const estadoReg = await env.DB_CONFIG.prepare("SELECT valor FROM sistema WHERE clave = 'registro_estado'").first();
+  
+  if (estadoReg && estadoReg.valor === "cerrado") {
     return await sendMessage(env, chatId, "🚫 *Límite Alcanzado*\n\nHas llegado a las 100 Stars este mes. El botón de reanudar está bloqueado hasta el día 1.");
   }
 
+  // Si está abierto, el botón funciona normal
   const st = await getKV(env, "config:creator_registration") || "open"; 
   if (st === "open") { 
     await putKV(env, "config:creator_registration", "paused"); 
