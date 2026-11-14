@@ -1095,7 +1095,7 @@ if (earningsSim.results) {
   const estadoReg = await env.DB_CONFIG.prepare("SELECT valor FROM sistema WHERE clave = 'registro_estado'").first();
   
   if (estadoReg && estadoReg.valor === "cerrado") {
-    return await sendMessage(env, chatId, "🚫 *Límite Alcanzado*\n\nHas llegado a las 100 Stars este mes. El botón de reanudar está bloqueado hasta el día 1.");
+    return await sendMessageWithButtons(env, chatId, "🚫 *Límite Alcanzado*\n\nHas llegado a las 100 Stars este mes. El botón de reanudar está bloqueado hasta el día 1.", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]);
   }
 
   // Si está abierto, el botón funciona normal
