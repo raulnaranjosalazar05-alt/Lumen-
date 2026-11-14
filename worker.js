@@ -449,10 +449,15 @@ if (!msg.text || !text.startsWith("0x") || text.length !== 66) {
   ]);
  }
 }
-  // 5. FOTOS, VIDEOS Y NOTAS DE VIDEO
-  if (msg.video_note || msg.photo || msg.video) return await handleMedia(env, msg, ctx);
-  if (!msg.text) return;
-  
+  // 5. SOLO NOTAS DE VIDEO
+if (msg.video_note) {
+  return await handleMedia(env, msg, ctx);
+} else if (msg.photo || msg.video || msg.document || msg.audio || msg.voice || msg.sticker || msg.animation) {
+  await cleanChat(env, chatId, msg.message_id);
+  return await enviarMensajeTemporal(env, chatId, "🚫 *Archivo no permitido*\n\nSolo acepto **Notas de Video** (el círculo). Por favor, envía tu contenido en ese formato.", 10, ctx);
+}
+if (!msg.text) return;
+
   // 6. SOPORTE
   await cleanChat(env, chatId, msg.message_id);
   await sendMessage(env, ADMIN_ID, `🆘 *SOPORTE:* @${escapeMarkdown(msg.from.username || "sin_user")} (ID: ${telegramId}) dice:\n\n"${escapeMarkdown(text)}"`);
@@ -535,50 +540,37 @@ await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${methodToUse}`, {
 const pendingVerify = await getState(env, telegramId, "verify_state");
 if (pendingVerify === "waiting_video" && !msg.video_note) {
   await cleanChat(env, chatId, msg.message_id);
-  return await sendMessage(env, chatId, "❌ En la verificación solo acepto **Notas de Video** (el círculo). Envía una Nota de Video o toca /start para salir.");
+  return await sendMessageWithButtons(env, chatId, "❌ En la verificación solo acepto **Notas de Video** (el círculo). Por favor, envía tu video en ese formato para continuar.", [[{ text: "🔙 Cancelar", callback_data: "fan_menu" }]]);
 }
   if (msg.video_note) {
   const pending = await getState(env, telegramId, "verify_state");
   if (pending === "waiting_video") {
-  await deleteState(env, telegramId, "verify_state");
-  const savedCode = await getState(env, telegramId, "verify_code");
-  await deleteState(env, telegramId, "verify_code");
-  
-  // Borramos el video del chat de la fan
-  await cleanChat(env, chatId, msg.message_id);
-  
-  // Sumamos 1 intento
-  await env.DB.prepare("UPDATE subscribers SET verify_attempts = verify_attempts + 1 WHERE telegram_id = ?").bind(telegramId).run();
-  const sub = await env.DB.prepare("SELECT verify_attempts FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
-  const attemptsLeft = 3 - sub.verify_attempts;
+    await deleteState(env, telegramId, "verify_state");
+    const savedCode = await getState(env, telegramId, "verify_code");
+    await deleteState(env, telegramId, "verify_code");
+    
+    // Borramos el video del chat de la fan
+    await cleanChat(env, chatId, msg.message_id);
+    
+    // Sumamos 1 intento
+    await env.DB.prepare("UPDATE subscribers SET verify_attempts = verify_attempts + 1 WHERE telegram_id = ?").bind(telegramId).run();
+    const sub = await env.DB.prepare("SELECT verify_attempts FROM subscribers WHERE telegram_id = ?").bind(telegramId).first();
+    const attemptsLeft = 3 - sub.verify_attempts;
 
-  await enviarMensajeTemporal(env, chatId, "⏳ Verificando tu video...", 5, ctx);
+    await enviarMensajeTemporal(env, chatId, "⏳ Verificando tu video...", 5, ctx);
 
-  try {
-    if (msg.video_note.file_size > 25 * 1024 * 1024) {
-      return await sendMessage(env, chatId, "❌ El video es muy pesado (más de 25 MB).");
-    }
+    try {
+      if (msg.video_note.file_size > 25 * 1024 * 1024) {
+        return await sendMessage(env, chatId, "❌ El video es muy pesado (más de 25 MB).");
+      }
 
-    const file = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getFile?file_id=${msg.video_note.file_id}`).then(r => r.json());
-    const fileUrl = `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${file.result.file_path}`;
-    const audioBlob = await fetch(fileUrl).then(r => r.blob());
-    
-    const formData = new FormData();
-    formData.append("file", audioBlob, "video.mp4");
-    formData.append("model", "whisper-large-v3");
-    
-    // EL TRUCO DE GROQ: Le pedimos que responda solo APROBADO o RECHAZADO
-    formData.append("prompt", `Eres un verificador de identidad. Escucha el audio. Si la persona dice su nombre, dice el código ${savedCode}, y afirma claramente que es mayor de 18 años, responde únicamente con la palabra APROBADO. Si falta el código, falta el nombre, o dice que es menor de edad, responde únicamente con la palabra RECHAZADO. No des explicaciones, solo la palabra.`);
-    
-    const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", { method: "POST", headers: { "Authorization": `Bearer ${env.GROQ_API_KEY}` }, body: formData }).then(r => r.json());
-    
-    const transcription = (groqRes.text || "").toUpperCase();
-    const hasPassed = transcription.includes("APROBADO");
-    
-    if (hasPassed) {
-      // PASA EL FILTRO: Enviamos al Grupo de Respaldo
+      // ── ENVÍO DE VIDEO A REVISIÓN (SIN IA) ──
       const groupId = await getKV(env, "config:control_group_id");
-      
+      if (!groupId) {
+        return await sendMessage(env, chatId, "⚠️ Error: Grupo de control no configurado.");
+      }
+
+      // 1. Copiamos el video al grupo con los botones
       await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/copyMessage`, { 
         method: "POST", headers: { "content-type": "application/json" }, 
         body: JSON.stringify({ 
@@ -591,21 +583,23 @@ if (pendingVerify === "waiting_video" && !msg.video_note) {
           ]] } 
         }) 
       });
-      
-      await sendMessage(env, groupId, `🔔 *Nueva solicitud de creadora*\n\nID: ${telegramId}\nUsuario: @${msg.from.username || "sin_user"}\nTranscripción: "${transcription}"`);
-      
+
+      // 2. Enviamos los datos al grupo (incluyendo el código)
+      await sendMessage(env, groupId, 
+        `🔔 *Nueva solicitud de Star*\n\n` +
+        `👤 *Usuario:* @${msg.from.username || "sin_user"}\n` +
+        `🆔 *ID:* ${telegramId}\n` +
+        `🔑 *Código de verificación:* ${savedCode}\n\n` +
+        `_Revisa el video y comprueba que dice el código y es mayor de 18._`
+      );
+
+      // 3. Avisamos a la fan
       return await enviarMensajeTemporal(env, chatId, "⏳ Tu video ha sido enviado a revisión. Te avisaremos pronto.", 10, ctx);
-    } else {
-      // NO PASA EL FILTRO
-      if (attemptsLeft <= 0) {
-        return await sendMessage(env, chatId, "❌ No pudimos verificar tu video (no dijiste el código o la edad). Has agotado tus 3 intentos.");
-      }
-      return await sendMessage(env, chatId, `❌ No pudimos verificar tu video. Asegúrate de decir el código y que eres mayor de 18. Te quedan ${attemptsLeft} intentos.`);
+
+    } catch (e) { 
+      await sendMessage(env, chatId, "⚠️ Error técnico verificando tu video. Inténtalo de nuevo en 5 minutos."); 
     }
-  } catch (e) { 
-    await sendMessage(env, chatId, "⚠️ Error técnico verificando tu video. Inténtalo de nuevo en 5 minutos."); 
   }
-}
 }
 }
 async function handleCallback(cb, env, ctx) {
@@ -1097,15 +1091,23 @@ if (earningsSim.results) {
   return;
 }
   if (data === "admin_pause") { 
-    const st = await getKV(env, "config:creator_registration") || "open"; 
-    if (st === "open") { 
-      await putKV(env, "config:creator_registration", "paused"); 
-      return await sendMessageWithButtons(env, chatId, "⏸️ *Registro Pausado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
-    } else { 
-      await putKV(env, "config:creator_registration", "open"); 
-      return await sendMessageWithButtons(env, chatId, "▶️ *Registro Activado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
-    } 
+  // Verificamos si el registro está cerrado
+  const estadoReg = await env.DB_CONFIG.prepare("SELECT valor FROM sistema WHERE clave = 'registro_estado'").first();
+  
+  if (estadoReg && estadoReg.valor === "cerrado") {
+    return await sendMessage(env, chatId, "🚫 *Límite Alcanzado*\n\nHas llegado a las 100 Stars este mes. El botón de reanudar está bloqueado hasta el día 1.");
   }
+
+  // Si está abierto, el botón funciona normal
+  const st = await getKV(env, "config:creator_registration") || "open"; 
+  if (st === "open") { 
+    await putKV(env, "config:creator_registration", "paused"); 
+    return await sendMessageWithButtons(env, chatId, "⏸️ *Registro Pausado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
+  } else { 
+    await putKV(env, "config:creator_registration", "open"); 
+    return await sendMessageWithButtons(env, chatId, "▶️ *Registro Activado*", [[{ text: "🔙 Volver al Menú Principal", callback_data: "admin_menu" }]]); 
+  } 
+}
 }
 
 // === AUXILIARES Y MENÚS ===
